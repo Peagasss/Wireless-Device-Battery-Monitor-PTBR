@@ -229,7 +229,7 @@ void PollBluetooth(PollContext& ctx) {
     }
 
     for (auto& [cid, f] : battery) {
-        if (reported.count(cid)) continue;
+        if (reported.count(cid) || ctx.btContainers.count(cid)) continue;
         auto mc = containerConn.find(cid);
         if (mc != containerConn.end() ? !mc->second : !f.connected) continue;
         DeviceStatus s;

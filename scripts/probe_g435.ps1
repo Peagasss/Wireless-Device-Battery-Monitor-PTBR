@@ -1,19 +1,25 @@
-# Logitech G435 LIGHTSPEED (Jieli 4C4A:4155) - Deep USB/HID/Audio Diagnostics Probe (v3)
-# 100% Somente Leitura (Nao envia comandos de escrita aleatorios; preserva audio, mic e LIGHTSPEED)
+# Logitech G435 LIGHTSPEED (Receptor Jieli 4C4A:4155) - Script de Sondagem HID Somente Leitura
+#
+# Regras estritas de operacao:
+#  - Somente leitura (nao envia Output Reports, SetFeature ou comandos de escrita).
+#  - Identificacao estrita por VID/PID exato (0x4C4A:0x4155, 0x046D:0x0ADF, 0x046D:0x0ACB) via HidD_GetAttributes.
+#  - Utiliza exclusivamente os tamanhos de relatorio declarados por HidP_GetCaps (InputReportByteLength / FeatureReportByteLength).
+#  - Para o receptor Jieli 4C4A:4155 (relatorios nao numerados, InputReportByteLength = 3), testa apenas Report ID 0 com buffer exato de 3 bytes.
+#  - Nao testa Report IDs de 1 a 255 indiscriminadamente.
+#  - Nao executa HidD_GetFeature quando FeatureReportByteLength == 0.
+#  - Separa os resultados retornados pela API Win32 HID de evidencias de barramento USB (nao assume STALL fisico a partir de GetLastError).
 
 param(
-    [int]$ListenSeconds = 25,
-    [switch]$DumpAllLocalHidForDebug
+    [int]$CaptureSeconds = 15
 )
 
 $code = @"
 using System;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
-public class HidDeepProbe {
+public class G435HidProbe {
     [StructLayout(LayoutKind.Sequential)]
     public struct HIDD_ATTRIBUTES {
         public int Size;
@@ -44,82 +50,20 @@ public class HidDeepProbe {
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct HIDP_LINK_COLLECTION_NODE {
-        public ushort LinkUsage;
-        public ushort LinkUsagePage;
-        public ushort Parent;
-        public ushort NumberOfChildren;
-        public ushort NextSibling;
-        public ushort FirstChild;
-        public uint Flags;
-        public IntPtr UserContext;
-    }
-
-    [StructLayout(LayoutKind.Explicit)]
-    public struct HIDP_BUTTON_CAPS {
-        [FieldOffset(0)] public ushort UsagePage;
-        [FieldOffset(2)] public byte ReportID;
-        [FieldOffset(3)] public byte IsAlias;
-        [FieldOffset(4)] public ushort BitField;
-        [FieldOffset(6)] public ushort LinkCollection;
-        [FieldOffset(8)] public ushort LinkUsage;
-        [FieldOffset(10)] public ushort LinkUsagePage;
-        [FieldOffset(12)] public byte IsRange;
-        [FieldOffset(13)] public byte IsStringRange;
-        [FieldOffset(14)] public byte IsDesignatorRange;
-        [FieldOffset(15)] public byte IsAbsolute;
-        [FieldOffset(16)] public ushort ReportCount;
-        [FieldOffset(18)] public ushort Reserved2;
-        [FieldOffset(56)] public ushort UsageMin;
-        [FieldOffset(58)] public ushort UsageMax;
-        [FieldOffset(60)] public ushort StringMin;
-        [FieldOffset(62)] public ushort StringMax;
-        [FieldOffset(64)] public ushort DesignatorMin;
-        [FieldOffset(66)] public ushort DesignatorMax;
-        [FieldOffset(68)] public ushort DataIndexMin;
-        [FieldOffset(70)] public ushort DataIndexMax;
-    }
-
-    [StructLayout(LayoutKind.Explicit)]
-    public struct HIDP_VALUE_CAPS {
-        [FieldOffset(0)] public ushort UsagePage;
-        [FieldOffset(2)] public byte ReportID;
-        [FieldOffset(3)] public byte IsAlias;
-        [FieldOffset(4)] public ushort BitField;
-        [FieldOffset(6)] public ushort LinkCollection;
-        [FieldOffset(8)] public ushort LinkUsage;
-        [FieldOffset(10)] public ushort LinkUsagePage;
-        [FieldOffset(12)] public byte IsRange;
-        [FieldOffset(13)] public byte IsStringRange;
-        [FieldOffset(14)] public byte IsDesignatorRange;
-        [FieldOffset(15)] public byte IsAbsolute;
-        [FieldOffset(16)] public byte HasNull;
-        [FieldOffset(17)] public byte Reserved;
-        [FieldOffset(18)] public ushort BitSize;
-        [FieldOffset(20)] public ushort ReportCount;
-        [FieldOffset(32)] public uint UnitsExp;
-        [FieldOffset(36)] public uint Units;
-        [FieldOffset(40)] public int LogicalMin;
-        [FieldOffset(44)] public int LogicalMax;
-        [FieldOffset(48)] public int PhysicalMin;
-        [FieldOffset(52)] public int PhysicalMax;
-        [FieldOffset(56)] public ushort UsageMin;
-        [FieldOffset(58)] public ushort UsageMax;
-        [FieldOffset(60)] public ushort StringMin;
-        [FieldOffset(62)] public ushort StringMax;
-        [FieldOffset(64)] public ushort DesignatorMin;
-        [FieldOffset(66)] public ushort DesignatorMax;
-        [FieldOffset(68)] public ushort DataIndexMin;
-        [FieldOffset(70)] public ushort DataIndexMax;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     public struct OVERLAPPED {
         public IntPtr Internal;
         public IntPtr InternalHigh;
         public int Offset;
         public int OffsetHigh;
         public IntPtr hEvent;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SP_DEVICE_INTERFACE_DATA {
+        public int cbSize;
+        public Guid interfaceClassGuid;
+        public int flags;
+        public IntPtr reserved;
     }
 
     [DllImport("hid.dll", SetLastError = true)]
@@ -138,42 +82,22 @@ public class HidDeepProbe {
     public static extern int HidP_GetCaps(IntPtr preparsedData, ref HIDP_CAPS capabilities);
 
     [DllImport("hid.dll", SetLastError = true)]
-    public static extern int HidP_GetLinkCollectionNodes([Out] HIDP_LINK_COLLECTION_NODE[] linkCollectionNodes, ref uint linkCollectionNodesLength, IntPtr preparsedData);
-
-    [DllImport("hid.dll", SetLastError = true)]
-    public static extern int HidP_GetButtonCaps(int reportType, [Out] HIDP_BUTTON_CAPS[] buttonCaps, ref ushort buttonCapsLength, IntPtr preparsedData);
-
-    [DllImport("hid.dll", SetLastError = true)]
-    public static extern int HidP_GetValueCaps(int reportType, [Out] HIDP_VALUE_CAPS[] valueCaps, ref ushort valueCapsLength, IntPtr preparsedData);
+    public static extern bool HidD_GetInputReport(SafeFileHandle hidDeviceObject, byte[] lpReportBuffer, int reportBufferLength);
 
     [DllImport("hid.dll", SetLastError = true)]
     public static extern bool HidD_GetFeature(SafeFileHandle hidDeviceObject, byte[] lpReportBuffer, int reportBufferLength);
 
     [DllImport("hid.dll", SetLastError = true)]
-    public static extern bool HidD_GetInputReport(SafeFileHandle hidDeviceObject, byte[] lpReportBuffer, int reportBufferLength);
+    public static extern bool HidD_GetManufacturerString(SafeFileHandle hidDeviceObject, byte[] buffer, int bufferLength);
 
     [DllImport("hid.dll", SetLastError = true)]
     public static extern bool HidD_GetProductString(SafeFileHandle hidDeviceObject, byte[] buffer, int bufferLength);
 
     [DllImport("hid.dll", SetLastError = true)]
-    public static extern bool HidD_GetManufacturerString(SafeFileHandle hidDeviceObject, byte[] buffer, int bufferLength);
-
-    [DllImport("hid.dll", SetLastError = true)]
     public static extern bool HidD_GetSerialNumberString(SafeFileHandle hidDeviceObject, byte[] buffer, int bufferLength);
-
-    [DllImport("hid.dll", SetLastError = true)]
-    public static extern bool HidD_GetNumInputBuffers(SafeFileHandle hidDeviceObject, out int numberBuffers);
 
     [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Auto)]
     public static extern IntPtr SetupDiGetClassDevs(ref Guid classGuid, IntPtr enumerator, IntPtr hwndParent, int flags);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct SP_DEVICE_INTERFACE_DATA {
-        public int cbSize;
-        public Guid interfaceClassGuid;
-        public int flags;
-        public IntPtr reserved;
-    }
 
     [DllImport("setupapi.dll", SetLastError = true)]
     public static extern bool SetupDiEnumDeviceInterfaces(IntPtr deviceInfoSet, IntPtr deviceInfoData, ref Guid interfaceClassGuid, int memberIndex, ref SP_DEVICE_INTERFACE_DATA deviceInterfaceData);
@@ -205,18 +129,69 @@ public class HidDeepProbe {
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CancelIo(SafeFileHandle hFile);
 
-    public static int ReadWithTimeout(SafeFileHandle h, byte[] buf, int timeoutMs, out int win32Err) {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DEVPROPKEY {
+        public Guid fmtid;
+        public uint pid;
+    }
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint CM_Get_Device_ID_List_SizeW(out uint pulLen, string pszFilter, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint CM_Get_Device_ID_ListW(string pszFilter, char[] Buffer, uint BufferLen, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll")]
+    public static extern uint CM_Get_DevNode_PropertyW(uint dnDevInst, ref DEVPROPKEY PropertyKey, out uint PropertyType, byte[] PropertyBuffer, ref uint PropertyBufferSize, uint ulFlags);
+
+    public static int ReadDevNodeByteProperty(string instanceId, Guid guid, uint pid) {
+        uint devInst = 0;
+        if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return -1;
+        DEVPROPKEY key = new DEVPROPKEY { fmtid = guid, pid = pid };
+        byte[] buf = new byte[1];
+        uint size = 1;
+        uint type = 0;
+        if (CM_Get_DevNode_PropertyW(devInst, ref key, out type, buf, ref size, 0) != 0) return -1;
+        if (type == 0x03 && size >= 1) return buf[0]; // DEVPROP_TYPE_BYTE = 0x03
+        if (type == 0x11 && size >= 1) return buf[0] != 0 ? 1 : 0; // DEVPROP_TYPE_BOOLEAN = 0x11
+        return -1;
+    }
+
+    public static string ReadDevNodeStringProperty(string instanceId, Guid guid, uint pid) {
+        uint devInst = 0;
+        if (CM_Locate_DevNodeW(out devInst, instanceId, 0) != 0) return "";
+        DEVPROPKEY key = new DEVPROPKEY { fmtid = guid, pid = pid };
+        uint size = 0;
+        uint type = 0;
+        uint st = CM_Get_DevNode_PropertyW(devInst, ref key, out type, null, ref size, 0);
+        if ((st != 0 && st != 0x1A) || size == 0 || type != 0x12) return ""; // CR_BUFFER_SMALL = 0x1A, DEVPROP_TYPE_STRING = 0x12
+        byte[] buf = new byte[size];
+        if (CM_Get_DevNode_PropertyW(devInst, ref key, out type, buf, ref size, 0) != 0) return "";
+        return Encoding.Unicode.GetString(buf).TrimEnd('\0').Trim();
+    }
+
+    public static string[] EnumerateBthEnumInstances() {
+        uint len = 0;
+        if (CM_Get_Device_ID_List_SizeW(out len, "BTHENUM", 1) != 0 || len == 0) return new string[0];
+        char[] buf = new char[len];
+        if (CM_Get_Device_ID_ListW("BTHENUM", buf, len, 1) != 0) return new string[0];
+        return new string(buf).Split(new char[] { '\0' }, StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    public static int ReadInterruptReport(SafeFileHandle h, byte[] buf, int timeoutMs, out int win32Err) {
         win32Err = 0;
         IntPtr hEvent = CreateEvent(IntPtr.Zero, true, false, null);
-        OVERLAPPED ov = new OVERLAPPED();
-        ov.hEvent = hEvent;
+        OVERLAPPED ov = new OVERLAPPED { hEvent = hEvent };
         IntPtr pOv = Marshal.AllocHGlobal(Marshal.SizeOf(ov));
         Marshal.StructureToPtr(ov, pOv, false);
 
         int got = -1;
-        bool read = ReadFile(h, buf, buf.Length, IntPtr.Zero, pOv);
+        bool ok = ReadFile(h, buf, buf.Length, IntPtr.Zero, pOv);
         int err = Marshal.GetLastWin32Error();
-        if (read || err == 997) {
+        if (ok || err == 997) { // 997 = ERROR_IO_PENDING
             uint wait = WaitForSingleObject(hEvent, (uint)timeoutMs);
             if (wait == 0) {
                 if (!GetOverlappedResult(h, pOv, out got, false)) {
@@ -233,320 +208,13 @@ public class HidDeepProbe {
         Marshal.FreeHGlobal(pOv);
         return got;
     }
-
-    public static string DecodeConsumerUsage(ushort page, ushort usage) {
-        if (page == 0x0C) {
-            switch (usage) {
-                case 0x01: return "Consumer Control";
-                case 0xB0: return "Play";
-                case 0xB1: return "Pause";
-                case 0xB3: return "Fast Forward";
-                case 0xB5: return "Scan Next Track";
-                case 0xB6: return "Scan Previous Track";
-                case 0xB7: return "Rewind";
-                case 0xCA: return "Tracking Increment";
-                case 0xCB: return "Tracking Decrement";
-                case 0xCC: return "Stop/Eject";
-                case 0xCD: return "Play/Pause";
-                case 0xE0: return "Volume";
-                case 0xE2: return "Mute";
-                case 0xE9: return "Volume Increment";
-                case 0xEA: return "Volume Decrement";
-                case 0x150: return "Balance Right";
-                case 0x151: return "Balance Left";
-            }
-        }
-        return "Usage_0x" + usage.ToString("X4");
-    }
-}
-
-// Minimal COM Interop for Windows Core Audio / WASAPI Jack & Endpoint inspection
-[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-public class MMDeviceEnumeratorCom {}
-
-[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IMMDeviceEnumerator {
-    int EnumAudioEndpoints(int dataFlow, uint dwStateMask, out IMMDeviceCollection ppDevices);
-    int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice ppEndpoint);
-    int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string pwstrId, out IMMDevice ppDevice);
-    int RegisterEndpointNotificationCallback(IntPtr pClient);
-    int UnregisterEndpointNotificationCallback(IntPtr pClient);
-}
-
-[Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IMMDeviceCollection {
-    int GetCount(out uint pcDevices);
-    int Item(uint nDevice, out IMMDevice ppDevice);
-}
-
-[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IMMDevice {
-    int Activate(ref Guid iid, uint dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
-    int OpenPropertyStore(uint stgmAccess, out IPropertyStore ppProperties);
-    int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
-    int GetState(out uint pdwState);
-}
-
-[StructLayout(LayoutKind.Sequential)]
-public struct PROPERTYKEY {
-    public Guid fmtid;
-    public uint pid;
-}
-
-[Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IPropertyStore {
-    int GetCount(out uint cProps);
-    int GetAt(uint iProp, out PROPERTYKEY pkey);
-    int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
-}
-
-[StructLayout(LayoutKind.Explicit)]
-public struct PROPVARIANT {
-    [FieldOffset(0)] public ushort vt;
-    [FieldOffset(8)] public IntPtr ptrVal;
-    [FieldOffset(8)] public int intVal;
-    [FieldOffset(8)] public uint uintVal;
-}
-
-[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IAudioEndpointVolume {
-    int RegisterControlChangeNotify(IntPtr pNotify);
-    int UnregisterControlChangeNotify(IntPtr pNotify);
-    int GetChannelCount(out uint pnChannelCount);
-    int SetMasterVolumeLevel(float fLevelDB, ref Guid pguidEventContext);
-    int SetMasterVolumeLevelScalar(float fLevel, ref Guid pguidEventContext);
-    int GetMasterVolumeLevel(out float pfLevelDB);
-    int GetMasterVolumeLevelScalar(out float pfLevel);
-    int SetChannelVolumeLevel(uint nChannel, float fLevelDB, ref Guid pguidEventContext);
-    int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, ref Guid pguidEventContext);
-    int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
-    int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
-    int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid pguidEventContext);
-    int GetMute([MarshalAs(UnmanagedType.Bool)] out bool pbMute);
-}
-
-[Guid("2A07407E-6497-4A18-9787-32F79BD0D98F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IDeviceTopology {
-    int GetConnectorCount(out uint pCount);
-    int GetConnector(uint nIndex, out IConnector ppConnector);
-    int GetSubunitCount(out uint pCount);
-    int GetSubunit(uint nIndex, [MarshalAs(UnmanagedType.IUnknown)] out object ppSubunit);
-    int GetPartById(uint nId, out IPart ppPart);
-    int GetDeviceId([MarshalAs(UnmanagedType.LPWStr)] out string ppwstrDeviceId);
-    int GetSignalPath(IPart pIPartFrom, IPart pIPartTo, [MarshalAs(UnmanagedType.Bool)] bool bRejectMixedPaths, out IntPtr ppParts);
-}
-
-[Guid("9c2c4058-23f5-41de-877a-df3af236a09e"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IConnector {
-    int GetType(out int pType);
-    int GetDataFlow(out int pFlow);
-    int ConnectTo(IConnector pConnectTo);
-    int Disconnect();
-    int IsConnected([MarshalAs(UnmanagedType.Bool)] out bool pbConnected);
-    int GetConnectedTo(out IConnector ppConTo);
-    int GetConnectorIdConnectedTo([MarshalAs(UnmanagedType.LPWStr)] out string ppwstrConnectorId);
-    int GetDeviceIdConnectedTo([MarshalAs(UnmanagedType.LPWStr)] out string ppwstrDeviceId);
-}
-
-[Guid("AE2DE0E4-5BCA-4F2D-AA46-5D13F8FDB3A9"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IPart {
-    int GetName([MarshalAs(UnmanagedType.LPWStr)] out string ppwstrName);
-    int GetLocalId(out uint pnId);
-    int GetGlobalId([MarshalAs(UnmanagedType.LPWStr)] out string ppwstrGlobalId);
-    int GetPartType(out int pPartType);
-    int GetSubType(out Guid pSubType);
-    int GetControlInterfaceCount(out uint pCount);
-    int GetControlInterface(uint nIndex, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
-    int EnumPartsIncoming(out IntPtr ppParts);
-    int EnumPartsOutgoing(out IntPtr ppParts);
-    int GetTopologyObject(out IDeviceTopology ppTopology);
-    int Activate(uint dwClsContext, ref Guid refiid, [MarshalAs(UnmanagedType.IUnknown)] out object ppvObject);
-}
-
-[Guid("4509F757-2D46-4637-8E62-CE7DB944F57B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IKsJackDescription {
-    int GetJackCount(out uint pcJacks);
-    int GetJackDescription(uint nJack, out KSJACK_DESCRIPTION pDescription);
-}
-
-[StructLayout(LayoutKind.Sequential)]
-public struct KSJACK_DESCRIPTION {
-    public uint ChannelMapping;
-    public uint Color;
-    public int ConnectionType;
-    public int GeoLocation;
-    public int GenLocation;
-    public int PortConnection;
-    [MarshalAs(UnmanagedType.Bool)] public bool IsConnected;
-}
-
-public static class AudioInspector {
-    [DllImport("ole32.dll")]
-    public static extern int PropVariantClear(ref PROPVARIANT pvar);
-
-    public static void InspectG435Audio(bool dumpAll) {
-        try {
-            var enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
-            IMMDeviceCollection coll;
-            // eAll = 2, DEVICE_STATEMASK_ALL = 0x0000000F
-            enumerator.EnumAudioEndpoints(2, 0x0000000F, out coll);
-            uint count = 0;
-            coll.GetCount(out count);
-
-            Guid iidVolume = typeof(IAudioEndpointVolume).GUID;
-            Guid iidTopo = typeof(IDeviceTopology).GUID;
-            Guid iidJack = typeof(IKsJackDescription).GUID;
-            PROPERTYKEY pkeyFriendly = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 14 };
-            PROPERTYKEY pkeyContainer = new PROPERTYKEY { fmtid = new Guid("8c7ed206-3f8a-4827-b3ab-ae9e1faef6c7"), pid = 2 };
-
-            for (uint i = 0; i < count; i++) {
-                IMMDevice dev;
-                coll.Item(i, out dev);
-                string devId;
-                dev.GetId(out devId);
-                uint state = 0;
-                dev.GetState(out state);
-
-                IPropertyStore store;
-                dev.OpenPropertyStore(0, out store);
-                string friendly = "";
-                PROPVARIANT pv;
-                if (store.GetValue(ref pkeyFriendly, out pv) == 0 && pv.vt == 31 && pv.ptrVal != IntPtr.Zero) {
-                    friendly = Marshal.PtrToStringUni(pv.ptrVal);
-                }
-                PropVariantClear(ref pv);
-
-                if (!dumpAll && (friendly == null || friendly.IndexOf("G435", StringComparison.OrdinalIgnoreCase) < 0)) {
-                    continue;
-                }
-
-                Console.WriteLine("  [Audio Endpoint] " + friendly + " (State=" + state + ", ID=" + devId + ")");
-
-                try {
-                    object volObj;
-                    dev.Activate(ref iidVolume, 1, IntPtr.Zero, out volObj);
-                    var vol = volObj as IAudioEndpointVolume;
-                    if (vol != null) {
-                        float scalar = 0;
-                        bool mute = false;
-                        vol.GetMasterVolumeLevelScalar(out scalar);
-                        vol.GetMute(out mute);
-                        Console.WriteLine(string.Format("    Volume: {0:F0}%  Mute: {1}", scalar * 100.0f, mute));
-                    }
-                } catch {}
-
-                try {
-                    object topoObj;
-                    dev.Activate(ref iidTopo, 1, IntPtr.Zero, out topoObj);
-                    var topo = topoObj as IDeviceTopology;
-                    if (topo != null) {
-                        uint connCount = 0;
-                        topo.GetConnectorCount(out connCount);
-                        for (uint c = 0; c < connCount; c++) {
-                            IConnector conn;
-                            topo.GetConnector(c, out conn);
-                            bool isConn = false;
-                            conn.IsConnected(out isConn);
-                            string otherDev = "";
-                            try { conn.GetDeviceIdConnectedTo(out otherDev); } catch {}
-                            if (!string.IsNullOrEmpty(otherDev)) {
-                                IMMDevice hwDev;
-                                if (enumerator.GetDevice(otherDev, out hwDev) == 0) {
-                                    // Inspect DeviceTopology of the adapter itself
-                                }
-                            }
-                            IConnector connTo = null;
-                            try { conn.GetConnectedTo(out connTo); } catch {}
-                            if (connTo != null) {
-                                var part = connTo as IPart;
-                                if (part != null) {
-                                    IDeviceTopology adapterTopo;
-                                    part.GetTopologyObject(out adapterTopo);
-                                    uint subCount = 0;
-                                    adapterTopo.GetSubunitCount(out subCount);
-                                    Console.WriteLine("    Adapter Topology Subunits: " + subCount);
-                                    for (uint s = 0; s < subCount; s++) {
-                                        object subObj;
-                                        adapterTopo.GetSubunit(s, out subObj);
-                                        var sp = subObj as IPart;
-                                        if (sp != null) {
-                                            string sname; Guid stype; uint ctrls = 0;
-                                            sp.GetName(out sname);
-                                            sp.GetSubType(out stype);
-                                            sp.GetControlInterfaceCount(out ctrls);
-                                            Console.WriteLine("      Subunit[" + s + "]: " + sname + " (Controls=" + ctrls + ")");
-                                        }
-                                    }
-                                    var jack = part as IPart;
-                                    try {
-                                        object jackObj;
-                                        jack.Activate(1, ref iidJack, out jackObj);
-                                        var jd = jackObj as IKsJackDescription;
-                                        if (jd != null) {
-                                            uint jc = 0;
-                                            jd.GetJackCount(out jc);
-                                            for (uint j = 0; j < jc; j++) {
-                                                KSJACK_DESCRIPTION desc;
-                                                jd.GetJackDescription(j, out desc);
-                                                Console.WriteLine(string.Format("      Jack[{0}]: IsConnected={1}, ConnType={2}, GenLoc={3}, PortConn={4}",
-                                                    j, desc.IsConnected, desc.ConnectionType, desc.GenLocation, desc.PortConnection));
-                                            }
-                                        }
-                                    } catch {}
-                                }
-                            }
-                        }
-                    }
-                } catch {}
-                if (dumpAll) break; // Only sample 1 when debugging locally
-            }
-        } catch (Exception ex) {
-            Console.WriteLine("  AudioInspector Error: " + ex.Message);
-        }
-    }
-
-    public static void GetMuteAndVol(string nameFilter, out string summary) {
-        summary = "";
-        try {
-            var enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
-            IMMDeviceCollection coll;
-            enumerator.EnumAudioEndpoints(2, 0x00000001, out coll); // ACTIVE only
-            uint count = 0;
-            coll.GetCount(out count);
-            Guid iidVolume = typeof(IAudioEndpointVolume).GUID;
-            PROPERTYKEY pkeyFriendly = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 14 };
-            for (uint i = 0; i < count; i++) {
-                IMMDevice dev;
-                coll.Item(i, out dev);
-                IPropertyStore store;
-                dev.OpenPropertyStore(0, out store);
-                string friendly = "";
-                PROPVARIANT pv;
-                if (store.GetValue(ref pkeyFriendly, out pv) == 0 && pv.vt == 31 && pv.ptrVal != IntPtr.Zero) {
-                    friendly = Marshal.PtrToStringUni(pv.ptrVal);
-                }
-                PropVariantClear(ref pv);
-                if (friendly != null && friendly.IndexOf(nameFilter, StringComparison.OrdinalIgnoreCase) >= 0) {
-                    object volObj;
-                    dev.Activate(ref iidVolume, 1, IntPtr.Zero, out volObj);
-                    var vol = volObj as IAudioEndpointVolume;
-                    if (vol != null) {
-                        float scalar = 0; bool mute = false;
-                        vol.GetMasterVolumeLevelScalar(out scalar);
-                        vol.GetMute(out mute);
-                        summary += string.Format("[{0}: {1:F0}% Mute={2}] ", friendly, scalar * 100.0f, mute);
-                    }
-                }
-            }
-        } catch {}
-    }
 }
 "@
 
 try {
     Add-Type -TypeDefinition $code -Language CSharp
 } catch {
-    Write-Host "Erro compilando C# embarcado: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Erro ao compilar definicoes P/Invoke: $($_.Exception.Message)" -ForegroundColor Red
     return
 }
 
@@ -556,270 +224,300 @@ $FILE_SHARE_READ = 0x01
 $FILE_SHARE_WRITE = 0x02
 $OPEN_EXISTING = 3
 $GENERIC_READ = 0x80000000L
-$GENERIC_WRITE = 0x40000000L
 $FILE_FLAG_OVERLAPPED = 0x40000000L
+$HIDP_STATUS_SUCCESS = 0x00110000
 $Marshal = [System.Runtime.InteropServices.Marshal]
 
-Write-Host "======================================================================" -ForegroundColor Cyan
-Write-Host "===   DIAGNOSTICO PROFUNDO LOGITECH G435 (JIELI 4C4A:4155) - v3    ===" -ForegroundColor Cyan
-Write-Host "======================================================================" -ForegroundColor Cyan
-Write-Host ""
-
-# ---- 1. ENUMERACAO PNP COMPLETA POR CONTAINER ID ----
-Write-Host "[ETAPA 1] Nos PnP do Windows no mesmo Container do dongle 4C4A:4155:" -ForegroundColor Yellow
-$usbParents = Get-PnpDevice | Where-Object { $_.InstanceId -like "*VID_4C4A*PID_4155*" }
-$containerIds = @()
-foreach ($p in $usbParents) {
-    $cidProp = Get-PnpDeviceProperty -InstanceId $p.InstanceId -KeyName "DEVPKEY_Device_ContainerId" -ErrorAction SilentlyContinue
-    if ($cidProp -and $cidProp.Data) {
-        if ($containerIds -notcontains $cidProp.Data) { $containerIds += $cidProp.Data }
+function Get-HidString {
+    param([Microsoft.Win32.SafeHandles.SafeFileHandle]$Handle, [scriptblock]$Getter)
+    $buf = New-Object byte[] 256
+    if (& $Getter $Handle $buf) {
+        return [System.Text.Encoding]::Unicode.GetString($buf).Split([char]0)[0]
     }
+    return ""
 }
 
-if ($containerIds.Count -eq 0 -and -not $DumpAllLocalHidForDebug) {
-    Write-Host "  Nenhum dispositivo USB VID_4C4A&PID_4155 encontrado conectado." -ForegroundColor Red
-} else {
-    foreach ($cid in $containerIds) {
-        Write-Host "  ContainerId: $cid" -ForegroundColor Cyan
-        $allInContainer = Get-PnpDevice | Where-Object {
-            $c = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName "DEVPKEY_Device_ContainerId" -ErrorAction SilentlyContinue).Data
-            $c -eq $cid
-        }
-        foreach ($node in $allInContainer) {
-            Write-Host "  -> [$($node.Status)] [$($node.Class)] $($node.FriendlyName) ($($node.InstanceId))" -ForegroundColor Green
-            $props = Get-PnpDeviceProperty -InstanceId $node.InstanceId -ErrorAction SilentlyContinue | Where-Object {
-                $_.Data -ne $null -and $_.KeyName -notlike "*Date*" -and $_.KeyName -notlike "*FriendlyName*"
-            }
-            foreach ($pr in $props) {
-                if ($pr.Data -is [byte[]]) {
-                    $take = [Math]::Min($pr.Data.Length, 16)
-                    $hex = ($pr.Data[0..($take - 1)] | ForEach-Object { "{0:X2}" -f $_ }) -join " "
-                    $valStr = "byte[$($pr.Data.Length)]: $hex"
-                } elseif ($pr.Data -is [Array]) {
-                    $valStr = ($pr.Data -join ", ")
-                } else {
-                    $valStr = "$($pr.Data)"
-                }
-                Write-Host "       $($pr.KeyName) = $valStr" -ForegroundColor Gray
-            }
-        }
-    }
-}
-
-# ---- 2. INSPECAO DE TOPOLOGIA DE AUDIO (WASAPI / UAC) ----
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "===  RELATORIO DE SONDAGEM HID - LOGITECH G435 (JIELI 4C4A:4155)   ===" -ForegroundColor Cyan
+Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "[ETAPA 2] Topologia de Audio (WASAPI / Jack / Subunits):" -ForegroundColor Yellow
-[AudioInspector]::InspectG435Audio([bool]$DumpAllLocalHidForDebug)
-
-# ---- 3. RECONSTITUICAO COMPLETA DO DESCRITOR HID (HidP_*) ----
-Write-Host ""
-Write-Host "[ETAPA 3] Analise Completa das Colecoes e Capacidades HID (HidP_*):" -ForegroundColor Yellow
 
 [Guid]$hidGuid = [Guid]::Empty
-[HidDeepProbe]::HidD_GetHidGuid([ref]$hidGuid)
-$devInfo = [HidDeepProbe]::SetupDiGetClassDevs([ref]$hidGuid, [IntPtr]::Zero, [IntPtr]::Zero, ($DIGCF_PRESENT -bor $DIGCF_DEVICEINTERFACE))
+[G435HidProbe]::HidD_GetHidGuid([ref]$hidGuid)
+$devInfo = [G435HidProbe]::SetupDiGetClassDevs([ref]$hidGuid, [IntPtr]::Zero, [IntPtr]::Zero, ($DIGCF_PRESENT -bor $DIGCF_DEVICEINTERFACE))
+
+if ($devInfo -eq [IntPtr]::Zero -or $devInfo -eq -1) {
+    Write-Host "Erro ao enumerar interfaces HID." -ForegroundColor Red
+    return
+}
 
 $index = 0
-$found = 0
-$targetPaths = @()
+$matchedDevices = 0
 
 while ($true) {
-    $ifData = New-Object HidDeepProbe+SP_DEVICE_INTERFACE_DATA
+    $ifData = New-Object G435HidProbe+SP_DEVICE_INTERFACE_DATA
     $ifData.cbSize = $Marshal::SizeOf($ifData)
-    if (-not [HidDeepProbe]::SetupDiEnumDeviceInterfaces($devInfo, [IntPtr]::Zero, [ref]$hidGuid, $index, [ref]$ifData)) { break }
+    if (-not [G435HidProbe]::SetupDiEnumDeviceInterfaces($devInfo, [IntPtr]::Zero, [ref]$hidGuid, $index, [ref]$ifData)) {
+        break
+    }
     $index++
 
     $reqSize = 0
-    [HidDeepProbe]::SetupDiGetDeviceInterfaceDetail($devInfo, [ref]$ifData, [IntPtr]::Zero, 0, [ref]$reqSize, [IntPtr]::Zero) | Out-Null
+    [G435HidProbe]::SetupDiGetDeviceInterfaceDetail($devInfo, [ref]$ifData, [IntPtr]::Zero, 0, [ref]$reqSize, [IntPtr]::Zero) | Out-Null
     if ($reqSize -le 0) { continue }
 
     $detailBuf = $Marshal::AllocHGlobal($reqSize)
-    $Marshal::WriteInt32($detailBuf, 8)
+    $Marshal::WriteInt32($detailBuf, $(if ([IntPtr]::Size -eq 8) { 8 } else { 6 }))
     $path = ""
-    if ([HidDeepProbe]::SetupDiGetDeviceInterfaceDetail($devInfo, [ref]$ifData, $detailBuf, $reqSize, [ref]$reqSize, [IntPtr]::Zero)) {
+    if ([G435HidProbe]::SetupDiGetDeviceInterfaceDetail($devInfo, [ref]$ifData, $detailBuf, $reqSize, [ref]$reqSize, [IntPtr]::Zero)) {
         $path = $Marshal::PtrToStringAuto([IntPtr]::Add($detailBuf, 4))
     }
     $Marshal::FreeHGlobal($detailBuf)
     if ([string]::IsNullOrEmpty($path)) { continue }
 
-    $isCandidate = ($path -like "*4c4a*4155*") -or ($path -like "*046d*0adf*") -or ($path -like "*046d*0acb*")
-    if ($DumpAllLocalHidForDebug -and $found -eq 0) { $isCandidate = $true }
-    if (-not $isCandidate) { continue }
+    # Abrir em modo de consulta (dwDesiredAccess = 0) para validar VID/PID exato via HidD_GetAttributes
+    $hQuery = [G435HidProbe]::CreateFile($path, 0, ($FILE_SHARE_READ -bor $FILE_SHARE_WRITE), [IntPtr]::Zero, $OPEN_EXISTING, 0, [IntPtr]::Zero)
+    if ($hQuery.IsInvalid) { continue }
 
-    $found++
-    $targetPaths += $path
-    Write-Host "  Dispositivo HID #$found : $path" -ForegroundColor Green
+    $attr = New-Object G435HidProbe+HIDD_ATTRIBUTES
+    $attr.Size = $Marshal::SizeOf($attr)
+    $hasAttr = [G435HidProbe]::HidD_GetAttributes($hQuery, [ref]$attr)
 
-    $h = [HidDeepProbe]::CreateFile($path, 0, ($FILE_SHARE_READ -bor $FILE_SHARE_WRITE), [IntPtr]::Zero, $OPEN_EXISTING, 0, [IntPtr]::Zero)
-    if ($h.IsInvalid) {
-        Write-Host "    Falha CreateFile(0) Win32Err=$($Marshal::GetLastWin32Error())" -ForegroundColor Red
+    if (-not $hasAttr) {
+        $hQuery.Close()
         continue
     }
 
-    $attr = New-Object HidDeepProbe+HIDD_ATTRIBUTES
-    $attr.Size = $Marshal::SizeOf($attr)
-    if ([HidDeepProbe]::HidD_GetAttributes($h, [ref]$attr)) {
-        Write-Host ("    VID=0x{0:X4} PID=0x{1:X4} Ver=0x{2:X4}" -f $attr.VendorID, $attr.ProductID, $attr.VersionNumber)
+    # Filtragem estrita pelo VID/PID exato dos receptores G435 conhecidos
+    $isJieliG435  = ($attr.VendorID -eq 0x4C4A -and $attr.ProductID -eq 0x4155)
+    $isHoltekG435 = ($attr.VendorID -eq 0x046D -and $attr.ProductID -eq 0x0ADF)
+    $isRealtekG435 = ($attr.VendorID -eq 0x046D -and $attr.ProductID -eq 0x0ACB)
+
+    if (-not ($isJieliG435 -or $isHoltekG435 -or $isRealtekG435)) {
+        $hQuery.Close()
+        continue
     }
 
-    foreach ($strInfo in @(
-        @{ Name="Fabricante"; Fn={ param($hh, $b) [HidDeepProbe]::HidD_GetManufacturerString($hh, $b, $b.Length) } },
-        @{ Name="Produto";    Fn={ param($hh, $b) [HidDeepProbe]::HidD_GetProductString($hh, $b, $b.Length) } },
-        @{ Name="Serial";     Fn={ param($hh, $b) [HidDeepProbe]::HidD_GetSerialNumberString($hh, $b, $b.Length) } }
-    )) {
-        $buf = New-Object byte[] 256
-        if (& $strInfo.Fn $h $buf) {
-            $s = [System.Text.Encoding]::Unicode.GetString($buf).Split([char]0)[0]
-            Write-Host "    $($strInfo.Name): `"$s`""
-        }
-    }
+    $matchedDevices++
+    $mfg  = Get-HidString -Handle $hQuery -Getter { param($hh, $b) [G435HidProbe]::HidD_GetManufacturerString($hh, $b, $b.Length) }
+    $prod = Get-HidString -Handle $hQuery -Getter { param($hh, $b) [G435HidProbe]::HidD_GetProductString($hh, $b, $b.Length) }
+    $ser  = Get-HidString -Handle $hQuery -Getter { param($hh, $b) [G435HidProbe]::HidD_GetSerialNumberString($hh, $b, $b.Length) }
 
-    $numInBuf = 0
-    if ([HidDeepProbe]::HidD_GetNumInputBuffers($h, [ref]$numInBuf)) {
-        Write-Host "    HidD_GetNumInputBuffers: $numInBuf"
-    }
+    $miMatch = [regex]::Match($path, "(?i)&mi_([0-9a-f]{2})")
+    $ifaceStr = if ($miMatch.Success) { "MI_$($miMatch.Groups[1].Value.ToUpper())" } else { "N/A" }
+
+    Write-Host "----------------------------------------------------------------------" -ForegroundColor Yellow
+    Write-Host "[1] IDENTIFICACAO DO DISPOSITIVO E INTERFACE" -ForegroundColor Yellow
+    Write-Host ("    Device Path : {0}" -f $path) -ForegroundColor White
+    Write-Host ("    Interface   : {0}" -f $ifaceStr) -ForegroundColor White
+    Write-Host ("    VID / PID   : 0x{0:X4} / 0x{1:X4} (Rev: 0x{2:X4})" -f $attr.VendorID, $attr.ProductID, $attr.VersionNumber) -ForegroundColor White
+    Write-Host ("    Fabricante  : {0}" -f $mfg) -ForegroundColor White
+    Write-Host ("    Produto     : {0}" -f $prod) -ForegroundColor White
+    Write-Host ("    Serial      : {0}" -f $ser) -ForegroundColor White
 
     $pp = [IntPtr]::Zero
-    if ([HidDeepProbe]::HidD_GetPreparsedData($h, [ref]$pp)) {
-        $caps = New-Object HidDeepProbe+HIDP_CAPS
-        $st = [HidDeepProbe]::HidP_GetCaps($pp, [ref]$caps)
-        Write-Host ("    HidP_GetCaps Status=0x{0:X8} | UsagePage=0x{1:X4} Usage=0x{2:X4}" -f $st, $caps.UsagePage, $caps.Usage) -ForegroundColor Cyan
-        Write-Host ("    ReportLengths: Input={0} Output={1} Feature={2}" -f $caps.InputReportByteLength, $caps.OutputReportByteLength, $caps.FeatureReportByteLength) -ForegroundColor Cyan
-        Write-Host ("    Counts: LinkNodes={0} | In(Btn={1},Val={2},Idx={3}) | Out(Btn={4},Val={5},Idx={6}) | Feat(Btn={7},Val={8},Idx={9})" -f `
-            $caps.NumberLinkCollectionNodes,
-            $caps.NumberInputButtonCaps, $caps.NumberInputValueCaps, $caps.NumberInputDataIndices,
-            $caps.NumberOutputButtonCaps, $caps.NumberOutputValueCaps, $caps.NumberOutputDataIndices,
-            $caps.NumberFeatureButtonCaps, $caps.NumberFeatureValueCaps, $caps.NumberFeatureDataIndices)
-
-        if ($caps.NumberLinkCollectionNodes -gt 0) {
-            [uint32]$nNodes = $caps.NumberLinkCollectionNodes
-            $nodes = New-Object HidDeepProbe+HIDP_LINK_COLLECTION_NODE[] $nNodes
-            [HidDeepProbe]::HidP_GetLinkCollectionNodes($nodes, [ref]$nNodes, $pp) | Out-Null
-            for ($ni = 0; $ni -lt $nNodes; $ni++) {
-                $nd = $nodes[$ni]
-                Write-Host ("      LinkNode[{0}]: Page=0x{1:X4} Usage=0x{2:X4} Type=0x{3:X2} Parent={4} Children={5}" -f `
-                    $ni, $nd.LinkUsagePage, $nd.LinkUsage, ($nd.Flags -band 0xFF), $nd.Parent, $nd.NumberOfChildren)
-            }
-        }
-
-        foreach ($rt in @(@{Id=0; Name="Input"; Count=$caps.NumberInputButtonCaps}, @{Id=1; Name="Output"; Count=$caps.NumberOutputButtonCaps}, @{Id=2; Name="Feature"; Count=$caps.NumberFeatureButtonCaps})) {
-            if ($rt.Count -gt 0) {
-                [uint16]$bcLen = $rt.Count
-                $bc = New-Object HidDeepProbe+HIDP_BUTTON_CAPS[] $bcLen
-                [HidDeepProbe]::HidP_GetButtonCaps($rt.Id, $bc, [ref]$bcLen, $pp) | Out-Null
-                for ($bi = 0; $bi -lt $bcLen; $bi++) {
-                    $b = $bc[$bi]
-                    $uDesc = if ($b.IsRange -ne 0) {
-                        "Range 0x{0:X4}..0x{1:X4}" -f $b.UsageMin, $b.UsageMax
-                    } else {
-                        "0x{0:X4} ({1})" -f $b.UsageMin, [HidDeepProbe]::DecodeConsumerUsage($b.UsagePage, $b.UsageMin)
-                    }
-                    Write-Host ("      {0} ButtonCap[{1}]: ReportID={2} Page=0x{3:X4} {4} BitField=0x{5:X4} ReportCount={6} Abs={7} DataIdx={8}..{9}" -f `
-                        $rt.Name, $bi, $b.ReportID, $b.UsagePage, $uDesc, $b.BitField, $b.ReportCount, $b.IsAbsolute, $b.DataIndexMin, $b.DataIndexMax) -ForegroundColor White
-                }
-            }
-        }
-
-        foreach ($rt in @(@{Id=0; Name="Input"; Count=$caps.NumberInputValueCaps}, @{Id=1; Name="Output"; Count=$caps.NumberOutputValueCaps}, @{Id=2; Name="Feature"; Count=$caps.NumberFeatureValueCaps})) {
-            if ($rt.Count -gt 0) {
-                [uint16]$vcLen = $rt.Count
-                $vc = New-Object HidDeepProbe+HIDP_VALUE_CAPS[] $vcLen
-                [HidDeepProbe]::HidP_GetValueCaps($rt.Id, $vc, [ref]$vcLen, $pp) | Out-Null
-                for ($vi = 0; $vi -lt $vcLen; $vi++) {
-                    $v = $vc[$vi]
-                    Write-Host ("      {0} ValueCap[{1}]: ReportID={2} Page=0x{3:X4} Usage=0x{4:X4}..0x{5:X4} BitSize={6} ReportCount={7} Log={8}..{9}" -f `
-                        $rt.Name, $vi, $v.ReportID, $v.UsagePage, $v.UsageMin, $v.UsageMax, $v.BitSize, $v.ReportCount, $v.LogicalMin, $v.LogicalMax) -ForegroundColor White
-                }
-            }
-        }
-        [HidDeepProbe]::HidD_FreePreparsedData($pp) | Out-Null
+    if (-not [G435HidProbe]::HidD_GetPreparsedData($hQuery, [ref]$pp)) {
+        Write-Host ("    Erro: HidD_GetPreparsedData falhou (Win32Error={0})." -f $Marshal::GetLastWin32Error()) -ForegroundColor Red
+        $hQuery.Close()
+        continue
     }
 
-    $h.Close()
+    $caps = New-Object G435HidProbe+HIDP_CAPS
+    $capsStatus = [G435HidProbe]::HidP_GetCaps($pp, [ref]$caps)
+    [G435HidProbe]::HidD_FreePreparsedData($pp) | Out-Null
+    $hQuery.Close()
 
-    # Testar Feature e InputReport com log exato de Win32Error (somente leitura)
-    $hProbe = [HidDeepProbe]::CreateFile($path, $GENERIC_READ, ($FILE_SHARE_READ -bor $FILE_SHARE_WRITE), [IntPtr]::Zero, $OPEN_EXISTING, 0, [IntPtr]::Zero)
-    if ($hProbe.IsInvalid) {
-        $hProbe = [HidDeepProbe]::CreateFile($path, 0, ($FILE_SHARE_READ -bor $FILE_SHARE_WRITE), [IntPtr]::Zero, $OPEN_EXISTING, 0, [IntPtr]::Zero)
-    }
-    if (-not $hProbe.IsInvalid) {
-        Write-Host "    Testando HidD_GetFeature / HidD_GetInputReport (IDs 0..255):" -ForegroundColor Gray
-        $anyFeat = $false
-        $anyIn = $false
-        for ($rid = 0; $rid -le 255; $rid++) {
-            $fbuf = New-Object byte[] 65
-            $fbuf[0] = [byte]$rid
-            if ([HidDeepProbe]::HidD_GetFeature($hProbe, $fbuf, $fbuf.Length)) {
-                $anyFeat = $true
-                $hex = ($fbuf[0..15] | ForEach-Object { "{0:X2}" -f $_ }) -join " "
-                Write-Host "      GetFeature(ID=$rid) -> OK: $hex" -ForegroundColor Green
-            } else {
-                $e = $Marshal::GetLastWin32Error()
-                if ($rid -le 2) { Write-Host "      GetFeature(ID=$rid) -> FAIL Win32Err=$e" -ForegroundColor DarkGray }
-            }
-            $ibuf = New-Object byte[] 65
-            $ibuf[0] = [byte]$rid
-            if ([HidDeepProbe]::HidD_GetInputReport($hProbe, $ibuf, $ibuf.Length)) {
-                $anyIn = $true
-                $hex = ($ibuf[0..15] | ForEach-Object { "{0:X2}" -f $_ }) -join " "
-                Write-Host "      GetInputReport(ID=$rid) -> OK: $hex" -ForegroundColor Green
-            } else {
-                $e = $Marshal::GetLastWin32Error()
-                if ($rid -le 2) { Write-Host "      GetInputReport(ID=$rid) -> FAIL Win32Err=$e" -ForegroundColor DarkGray }
-            }
-        }
-        if (-not $anyFeat -and -not $anyIn) {
-            Write-Host "      (Nenhum Report ID 0..255 respondeu a GetFeature ou GetInputReport)" -ForegroundColor DarkGray
-        }
-        $hProbe.Close()
-    }
-}
-
-[HidDeepProbe]::SetupDiDestroyDeviceInfoList($devInfo) | Out-Null
-
-# ---- 4. CAPTURA CONTINUA DE EVENTOS NO ENDPOINT 0x82 + ESTADO DE AUDIO ----
-if ($targetPaths.Count -gt 0 -and -not $DumpAllLocalHidForDebug) {
-    $path = $targetPaths[0]
     Write-Host ""
-    Write-Host "[ETAPA 4] Captura continua no Endpoint 0x82 por $ListenSeconds segundos:" -ForegroundColor Yellow
-    Write-Host "  Durante os proximos $ListenSeconds segundos, realize na sequencia (com ~2-3s entre cada):" -ForegroundColor Magenta
-    Write-Host "   1) Aperte Volume +" -ForegroundColor Magenta
-    Write-Host "   2) Aperte Volume -" -ForegroundColor Magenta
-    Write-Host "   3) De um clique curto no botao MUTE (nao segure 3s)" -ForegroundColor Magenta
-    Write-Host "   4) Desligue o headset (segure Power), aguarde 3s, ligue novamente" -ForegroundColor Magenta
-    Write-Host "   5) (Opcional) Conecte/desconecte o cabo USB-C de carregamento no fone" -ForegroundColor Magenta
-    Write-Host ""
+    Write-Host "[2] TAMANHOS DE RELATORIOS DECLARADOS PELO WINDOWS (HidP_GetCaps)" -ForegroundColor Yellow
+    if ($capsStatus -ne $HIDP_STATUS_SUCCESS) {
+        Write-Host ("    Erro: HidP_GetCaps retornou status 0x{0:X8}." -f $capsStatus) -ForegroundColor Red
+        continue
+    }
+    Write-Host ("    UsagePage               : 0x{0:X4}" -f $caps.UsagePage) -ForegroundColor Cyan
+    Write-Host ("    Usage                   : 0x{0:X4}" -f $caps.Usage) -ForegroundColor Cyan
+    Write-Host ("    InputReportByteLength   : {0} bytes" -f $caps.InputReportByteLength) -ForegroundColor Cyan
+    Write-Host ("    OutputReportByteLength  : {0} bytes" -f $caps.OutputReportByteLength) -ForegroundColor Cyan
+    Write-Host ("    FeatureReportByteLength : {0} bytes" -f $caps.FeatureReportByteLength) -ForegroundColor Cyan
 
-    $ovHandle = [HidDeepProbe]::CreateFile($path, $GENERIC_READ, ($FILE_SHARE_READ -bor $FILE_SHARE_WRITE), [IntPtr]::Zero, $OPEN_EXISTING, $FILE_FLAG_OVERLAPPED, [IntPtr]::Zero)
-    if ($ovHandle.IsInvalid) {
-        Write-Host "  Falha ao abrir $path para leitura overlapped. Err=$($Marshal::GetLastWin32Error())" -ForegroundColor Red
+    # Abrir handle para testes somente leitura
+    $hRead = [G435HidProbe]::CreateFile($path, $GENERIC_READ, ($FILE_SHARE_READ -bor $FILE_SHARE_WRITE), [IntPtr]::Zero, $OPEN_EXISTING, 0, [IntPtr]::Zero)
+    if ($hRead.IsInvalid) {
+        $hRead = [G435HidProbe]::CreateFile($path, 0, ($FILE_SHARE_READ -bor $FILE_SHARE_WRITE), [IntPtr]::Zero, $OPEN_EXISTING, 0, [IntPtr]::Zero)
+    }
+
+    Write-Host ""
+    Write-Host "[3] RESULTADO DO TESTE DE LEITURA DE INPUT REPORT (HidD_GetInputReport)" -ForegroundColor Yellow
+    if ($hRead.IsInvalid) {
+        Write-Host ("    Nao foi possivel abrir handle para teste (Win32Error={0})." -f $Marshal::GetLastWin32Error()) -ForegroundColor Red
+    } elseif ($caps.InputReportByteLength -le 0) {
+        Write-Host "    HidD_GetInputReport NAO executado: InputReportByteLength = 0." -ForegroundColor Gray
     } else {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $lastAudio = ""
-        [AudioInspector]::GetMuteAndVol("G435", [ref]$lastAudio)
-        Write-Host ("  [0.00s] Estado Audio Inicial: {0}" -f $lastAudio) -ForegroundColor Cyan
-
-        while ($sw.Elapsed.TotalSeconds -lt $ListenSeconds) {
-            $inBuf = New-Object byte[] 64
-            $err = 0
-            $n = [HidDeepProbe]::ReadWithTimeout($ovHandle, $inBuf, 500, [ref]$err)
-            $tStr = "{0:F2}s" -f $sw.Elapsed.TotalSeconds
-            if ($n -gt 0) {
-                $hex = ($inBuf[0..($n - 1)] | ForEach-Object { "{0:X2}" -f $_ }) -join " "
-                Write-Host ("  [{0}] HID IN ({1} bytes): [ {2} ]" -f $tStr, $n, $hex) -ForegroundColor Green
-            } elseif ($err -ne 0) {
-                Write-Host ("  [{0}] HID Read Error={1}" -f $tStr, $err) -ForegroundColor Red
-                Start-Sleep -Milliseconds 300
+        # Para o receptor Jieli 4C4A:4155 (sem Report IDs explicitos no descritor), testar apenas Report ID 0
+        # utilizando um buffer exatamente do tamanho de InputReportByteLength (3 bytes).
+        $inLen = [int]$caps.InputReportByteLength
+        Write-Host ("    Parametros: ReportID = 0 | Tamanho do buffer = {0} bytes (InputReportByteLength exato) | 3 repeticoes" -f $inLen) -ForegroundColor Gray
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $inReportBuf = New-Object byte[] $inLen
+            $inReportBuf[0] = 0x00
+            $okIn = [G435HidProbe]::HidD_GetInputReport($hRead, $inReportBuf, $inReportBuf.Length)
+            $errIn = $Marshal::GetLastWin32Error()
+            $hexIn = ($inReportBuf | ForEach-Object { "{0:X2}" -f $_ }) -join " "
+            if ($okIn) {
+                Write-Host ("    Tentativa #{0}: Retorno=True  | Win32Error=0  | Buffer=[ {1} ]" -f $attempt, $hexIn) -ForegroundColor Green
+            } else {
+                Write-Host ("    Tentativa #{0}: Retorno=False | Win32Error={1} | Buffer=[ {2} ]" -f $attempt, $errIn, $hexIn) -ForegroundColor DarkYellow
             }
-
-            $curAudio = ""
-            [AudioInspector]::GetMuteAndVol("G435", [ref]$curAudio)
-            if ($curAudio -ne $lastAudio) {
-                Write-Host ("  [{0}] AUDIO MUDOU: {1}" -f $tStr, $curAudio) -ForegroundColor Yellow
-                $lastAudio = $curAudio
-            }
+            if ($attempt -lt 3) { Start-Sleep -Milliseconds 150 }
         }
-        $ovHandle.Close()
-        Write-Host "  Captura finalizada." -ForegroundColor Cyan
+        Write-Host "    Nota tecnica: Win32Error reflete o retorno da API/driver (hidclass.sys/hidusb.sys)." -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "[4] RESULTADO DOS TESTES DE FEATURE REPORT (HidD_GetFeature)" -ForegroundColor Yellow
+    if ($caps.FeatureReportByteLength -eq 0) {
+        Write-Host "    HidD_GetFeature NAO executado: FeatureReportByteLength = 0 declarado pelo Windows." -ForegroundColor Gray
+        Write-Host "    (Esta colecao HID nao declara suporte a Feature Reports)." -ForegroundColor Gray
+    } elseif (-not $hRead.IsInvalid) {
+        $featLen = [int]$caps.FeatureReportByteLength
+        $reportIdToTest = if ($isRealtekG435 -and $caps.UsagePage -eq 0xFFC0) { 6 } else { 0 }
+        $featBuf = New-Object byte[] $featLen
+        $featBuf[0] = [byte]$reportIdToTest
+
+        Write-Host ("    Parametros: ReportID = {0} | Tamanho do buffer = {1} bytes (FeatureReportByteLength exato)" -f $reportIdToTest, $featLen) -ForegroundColor Gray
+        $okFeat = [G435HidProbe]::HidD_GetFeature($hRead, $featBuf, $featBuf.Length)
+        $errFeat = $Marshal::GetLastWin32Error()
+
+        if ($okFeat) {
+            $hexFeat = ($featBuf | ForEach-Object { "{0:X2}" -f $_ }) -join " "
+            Write-Host ("    Resultado API HID : SUCESSO -> [ {0} ]" -f $hexFeat) -ForegroundColor Green
+        } else {
+            Write-Host ("    Resultado API HID : FALHOU (Retorno=False, Win32 GetLastError={0})" -f $errFeat) -ForegroundColor DarkYellow
+        }
+    }
+
+    if (-not $hRead.IsInvalid) {
+        $hRead.Close()
+    }
+
+    Write-Host ""
+    Write-Host ("[5] RELATORIOS HID RECEBIDOS DURANTE O PERIODO DE CAPTURA ({0}s)" -f $CaptureSeconds) -ForegroundColor Yellow
+    if ($caps.InputReportByteLength -gt 0 -and $CaptureSeconds -gt 0) {
+        $hOv = [G435HidProbe]::CreateFile($path, $GENERIC_READ, ($FILE_SHARE_READ -bor $FILE_SHARE_WRITE), [IntPtr]::Zero, $OPEN_EXISTING, $FILE_FLAG_OVERLAPPED, [IntPtr]::Zero)
+        if ($hOv.IsInvalid) {
+            Write-Host ("    Nao foi possivel abrir handle overlapped para leitura (Win32Error={0})." -f $Marshal::GetLastWin32Error()) -ForegroundColor Red
+        } else {
+            $inLen = [int]$caps.InputReportByteLength
+            Write-Host ("    Escutando Endpoint Interrupt IN com buffer exato de {0} bytes por {1} segundos..." -f $inLen, $CaptureSeconds) -ForegroundColor Gray
+            Write-Host "    (Opcional: acione controles do headset ou aguarde para observar pacotes espontaneos)" -ForegroundColor Magenta
+
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $packetsCount = 0
+            while ($sw.Elapsed.TotalSeconds -lt $CaptureSeconds) {
+                $readBuf = New-Object byte[] $inLen
+                $readErr = 0
+                $bytesRead = [G435HidProbe]::ReadInterruptReport($hOv, $readBuf, 500, [ref]$readErr)
+                $tStr = "{0:F2}s" -f $sw.Elapsed.TotalSeconds
+
+                if ($bytesRead -gt 0) {
+                    $packetsCount++
+                    $hexPkt = ($readBuf[0..($bytesRead - 1)] | ForEach-Object { "{0:X2}" -f $_ }) -join " "
+                    Write-Host ("    [{0}] Relatorio #{1} ({2} bytes): [ {3} ]" -f $tStr, $packetsCount, $bytesRead, $hexPkt) -ForegroundColor Green
+                } elseif ($readErr -ne 0) {
+                    Write-Host ("    [{0}] Erro ReadFile (Win32Error={1})" -f $tStr, $readErr) -ForegroundColor Red
+                    break
+                }
+            }
+            $hOv.Close()
+            Write-Host ("    Total de relatorios HID recebidos na janela de {0}s: {1}" -f $CaptureSeconds, $packetsCount) -ForegroundColor Cyan
+        }
     }
 }
+
+[G435HidProbe]::SetupDiDestroyDeviceInfoList($devInfo) | Out-Null
+
+# ---- VERIFICACAO BLUETOOTH HFP (Abordagem GearHub: BTHENUM + {0000111E-...} + DEVPKEY_Device_BatteryLevel) ----
+Write-Host ""
+Write-Host "----------------------------------------------------------------------" -ForegroundColor Yellow
+Write-Host "[6] VERIFICACAO BLUETOOTH HFP (DEVPKEY_Device_BatteryLevel / GearHub)" -ForegroundColor Yellow
+
+$BatteryGuid      = [Guid]"104EA319-6EE2-4701-BD47-8DDBF425BBE5" # pid 2
+$FriendlyNameGuid = [Guid]"A45C254E-DF1C-4EFD-8020-67D146A850E0" # pid 14
+$DeviceDescGuid   = [Guid]"A45C254E-DF1C-4EFD-8020-67D146A850E0" # pid 2
+$IsConnectedGuid  = [Guid]"83DA6326-97A6-4088-9453-A1923F573B29" # pid 15
+$HfpServiceMarker = "{0000111E-0000-1000-8000-00805F9B34FB}"
+
+$bthInstances = [G435HidProbe]::EnumerateBthEnumInstances()
+$btG435Found = $false
+$btG435Connected = $false
+$btG435Percent = -1
+$btG435Name = ""
+$btG435Mac = ""
+
+foreach ($inst in $bthInstances) {
+    if ($inst -notlike "*$HfpServiceMarker*") { continue }
+
+    # Extrair MAC de 12 digitos hexadecimais como no GearHub
+    $sep = $inst.LastIndexOf('\')
+    if ($sep -lt 0 -or ($sep + 1) -ge $inst.Length) { continue }
+    $tail = $inst.Substring($sep + 1)
+    $us = $tail.IndexOf('_')
+    $before = if ($us -lt 0) { $tail } else { $tail.Substring(0, $us) }
+    $amp = $before.LastIndexOf('&')
+    $mac = if ($amp -lt 0) { $before } else { $before.Substring($amp + 1) }
+    if ($mac.Length -ne 12) { continue }
+
+    # Buscar no base BTHENUM\DEV_<MAC>
+    $devMarker = "BTHENUM\DEV_$mac"
+    $baseInst = $bthInstances | Where-Object { $_.StartsWith($devMarker, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+    $devName = ""
+    $isConn = $false
+    if ($baseInst) {
+        $devName = [G435HidProbe]::ReadDevNodeStringProperty($baseInst, $FriendlyNameGuid, 14)
+        if ([string]::IsNullOrWhiteSpace($devName)) {
+            $devName = [G435HidProbe]::ReadDevNodeStringProperty($baseInst, $DeviceDescGuid, 2)
+        }
+        $connVal = [G435HidProbe]::ReadDevNodeByteProperty($baseInst, $IsConnectedGuid, 15)
+        $isConn = ($connVal -eq 1)
+    }
+
+    $pct = [G435HidProbe]::ReadDevNodeByteProperty($inst, $BatteryGuid, 2)
+    $isG435 = ($devName -match "(?i)\bg435\b")
+
+    Write-Host ("    Instancia HFP : {0}" -f $inst) -ForegroundColor Gray
+    Write-Host ("    Dispositivo   : `"{0}`" (MAC={1}, IsG435={2}, IsConnected={3})" -f $devName, $mac, $isG435, $isConn) -ForegroundColor White
+    if ($pct -ge 0 -and $pct -le 100) {
+        Write-Host ("    Bateria HFP   : {0}% (DEVPKEY_Device_BatteryLevel valida)" -f $pct) -ForegroundColor Green
+    } else {
+        Write-Host ("    Bateria HFP   : Indisponivel (retorno={0})" -f $pct) -ForegroundColor DarkYellow
+    }
+
+    if ($isG435) {
+        $btG435Found = $true
+        $btG435Name = $devName
+        $btG435Mac = $mac
+        $btG435Connected = $isConn
+        if ($pct -ge 0 -and $pct -le 100) { $btG435Percent = $pct }
+    }
+}
+
+if (-not $btG435Found) {
+    Write-Host "    Nenhum Logitech G435 pareado/conectado via Bluetooth (BTHENUM HFP) encontrado neste momento." -ForegroundColor DarkYellow
+}
+
+Write-Host ""
+Write-Host "----------------------------------------------------------------------" -ForegroundColor Yellow
+Write-Host "[7] ESTADO UNIFICADO DO LOGITECH G435 (Key = 'g435')" -ForegroundColor Yellow
+if ($btG435Found -and $btG435Connected) {
+    $pctStr = if ($btG435Percent -ge 0) { "$btG435Percent%" } else { "Desconhecido" }
+    Write-Host ("    Identidade Unica : Logitech G435 (key='g435')") -ForegroundColor Green
+    Write-Host ("    Modo Ativo       : Bluetooth (HFP)") -ForegroundColor Cyan
+    Write-Host ("    Porcentagem Real : {0}" -f $pctStr) -ForegroundColor Green
+} elseif ($matchedDevices -gt 0) {
+    $lastStr = if ($btG435Percent -ge 0) { "$btG435Percent% (ultimo valor lido via Bluetooth HFP) " } else { "" }
+    Write-Host ("    Identidade Unica : Logitech G435 (key='g435')") -ForegroundColor Green
+    Write-Host ("    Modo Ativo       : LIGHTSPEED") -ForegroundColor Cyan
+    Write-Host ("    Estado Exibido   : {0}Bateria indisponivel via LIGHTSPEED" -f $lastStr) -ForegroundColor Yellow
+} else {
+    Write-Host "    Nenhum Logitech G435 ativo (nem via LIGHTSPEED nem via Bluetooth)." -ForegroundColor Red
+}
+Write-Host "======================================================================" -ForegroundColor Cyan

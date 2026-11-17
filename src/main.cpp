@@ -314,8 +314,9 @@ std::wstring StatusText(const TrayEntry& e) {
     if (!s.levelText.empty() && s.percent >= 0) t = s.levelText;
     else if (s.percent >= 0) t = std::to_wstring(s.percent) + L"%";
     else if (e.lastPct >= 0) t = std::to_wstring(e.lastPct) + L"% " + Tr(StrId::LastKnown);
+    else if (!s.detail.empty()) return s.detail;
     else t = Tr(StrId::Unknown);
-    if (!s.detail.empty() && (s.percent >= 0 || e.lastPct < 0)) t += L" (" + s.detail + L")";
+    if (!s.detail.empty()) t += L" (" + s.detail + L")";
     if (s.charging) t += L", " + std::wstring(Tr(StrId::Charging));
     if (s.asleep) t += L", " + std::wstring(Tr(StrId::Asleep));
     return t;
@@ -759,7 +760,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     DEV_BROADCAST_DEVICEINTERFACE_W filter{ sizeof(filter) };
     filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
     filter.dbcc_classguid = GUID_DEVINTERFACE_HID;
-    HDEVNOTIFY notify = RegisterDeviceNotificationW(g_hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
+    HDEVNOTIFY notify = RegisterDeviceNotificationW(g_hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES);
 
     g_refreshEvt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     g_stopEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);

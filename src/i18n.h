@@ -118,8 +118,8 @@ inline const wchar_t* Tr(StrId id) {
         case StrId::Interval5m:
             return L"5 min";
         case StrId::G435JieliNoTelemetry:
-            return pt ? L"receptor Jieli 4C4A:4155 — sem telemetria USB"
-                      : L"Jieli 4C4A:4155 receiver — no USB telemetry";
+            return pt ? L"Bateria indisponível via LIGHTSPEED"
+                      : L"Battery unavailable via LIGHTSPEED";
         default:
             return L"";
     }
