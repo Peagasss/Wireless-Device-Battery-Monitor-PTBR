@@ -48,6 +48,7 @@ call "%VCVARS%" x64 >nul || exit /b 1
 :COMPILE
 if not exist build_msvc mkdir build_msvc
 del /q build_msvc\*.obj >nul 2>&1
+if exist WirelessBattery.exe del /f /q WirelessBattery.exe >nul 2>&1
 
 echo [2/3] Compilando recursos...
 rc.exe /nologo /fo build_msvc\app.res res\app.rc || exit /b 1

@@ -32,6 +32,12 @@ enum class StrId {
     Interval2m,
     Interval5m,
     G435JieliNoTelemetry,
+    G435CalibrateTitle,
+    G435CalibratePrompt,
+    G435BatteryUnknownUncalibrated,
+    G435BatteryRealBt,
+    G435BatteryReferenceBt,
+    G435BatteryEstimated,
 };
 
 inline Lang g_lang = Lang::Auto;
@@ -120,6 +126,24 @@ inline const wchar_t* Tr(StrId id) {
         case StrId::G435JieliNoTelemetry:
             return pt ? L"Bateria indisponível via LIGHTSPEED"
                       : L"Battery unavailable via LIGHTSPEED";
+        case StrId::G435CalibrateTitle:
+            return pt ? L"Logitech G435 — Calibração da bateria"
+                      : L"Logitech G435 — Battery calibration";
+        case StrId::G435CalibratePrompt:
+            return pt ? L"Conecte seu Logitech G435 via Bluetooth para realizar a primeira leitura da bateria. Depois disso, poderemos estimar o nível de carga durante o uso via LIGHTSPEED."
+                      : L"Connect your Logitech G435 via Bluetooth to take the first battery reading. After that, we can estimate the charge level during LIGHTSPEED use.";
+        case StrId::G435BatteryUnknownUncalibrated:
+            return pt ? L"Bateria desconhecida — conecte via Bluetooth para realizar a primeira leitura"
+                      : L"Battery unknown — connect via Bluetooth for first reading";
+        case StrId::G435BatteryRealBt:
+            return pt ? L"bateria real"
+                      : L"real battery";
+        case StrId::G435BatteryReferenceBt:
+            return pt ? L"referência Bluetooth — aguardando mais leituras para taxa de descarga"
+                      : L"Bluetooth reference — awaiting more readings for discharge rate";
+        case StrId::G435BatteryEstimated:
+            return pt ? L"bateria estimada"
+                      : L"estimated battery";
         default:
             return L"";
     }

@@ -1,39 +1,55 @@
-// Logitech G435 Wireless Gaming Headset — unified LIGHTSPEED & Bluetooth (HFP) driver.
+// Logitech G435 Wireless Gaming Headset — unified LIGHTSPEED & Bluetooth (HFP) driver
+// with adaptive Bluetooth-calibrated battery estimation and connection visibility.
 //
 // Unifies the Logitech G435 under a single logical identity (key "g435", name "Logitech G435")
 // across both connection modes so the headset is never duplicated when switching modes:
 //
 //  1) Bluetooth mode (Hands-Free Profile / HFP, GearHub approach):
-//     When the user switches the G435 to Bluetooth, Windows receives the real battery percentage
+//     When the user connects the G435 via Bluetooth, Windows receives the real battery percentage
 //     (0..100%) over the Hands-Free Audio Gateway service ({0000111E-0000-1000-8000-00805F9B34FB})
 //     and stores it in DEVPKEY_Device_BatteryLevel ({104EA319-6EE2-4701-BD47-8DDBF425BBE5}, pid 2)
 //     as a DEVPROP_TYPE_BYTE. Connection state is verified on the base BTHENUM\DEV_<MAC> (or
 //     BTHLE\DEV_<MAC>) node via DEVPKEY_Device_IsConnected ({83DA6326-97A6-4088-9453-A1923F573B29},
-//     pid 15). Only devices whose Bluetooth name strictly matches the G435 token are associated.
+//     pid 15). Each valid Bluetooth reading calibrates/recalibrates the persistent estimator in
+//     HKCU\Software\WirelessBattery\G435 and updates the learned discharge rate from real usage.
 //
 //  2) LIGHTSPEED mode via Jieli receiver (VID 0x4C4A, PID 0x4155):
-//     Recognizes the Jieli USB receiver on its Consumer Control collection (000C:0001: InLen 3 B,
-//     OutLen 0 B, FeatLen 0 B). Direct battery polling over this LIGHTSPEED receiver is currently
-//     on hold (not permanently abandoned; all descriptor, endpoint, and SDK findings are preserved
-//     in docs/logitech_g435.md for future investigation). While in LIGHTSPEED mode on 4C4A:4155,
-//     percent is set to -1 (unknown) and detail reports "Bateria indisponível via LIGHTSPEED"
-//     ("Battery unavailable via LIGHTSPEED"), while sharing the unified "g435" key preserves the
-//     last valid battery percentage read over Bluetooth without inventing or estimating values.
+//     Direct battery polling over this LIGHTSPEED receiver is currently on hold (not permanently
+//     abandoned; all descriptor, endpoint, and SDK findings are preserved in docs/logitech_g435.md).
+//     Because the USB receiver keeps its USB interfaces statically enumerated while plugged in,
+//     mere USB receiver presence is NOT treated as headset connection. Instead, LIGHTSPEED
+//     connection and active usage are detected via WASAPI audio session/meter activity on the G435
+//     USB audio endpoints, passive Consumer Control input reports on EP 0x82 (000C:0001), and
+//     recent mode transitions. While connected via LIGHTSPEED:
+//       - Uncalibrated (no prior Bluetooth reading): displays Unknown ("?") and prompts the user
+//         to connect via Bluetooth once to record the initial reference reading.
+//       - Calibrated (1 reading): displays the last real Bluetooth percentage as a reference ("~XX%").
+//       - Calibrated (2+ readings with learned discharge rate): displays an adaptive heuristic
+//         estimate ("~XX%") based strictly on accumulated active usage time.
 //
 //  3) LIGHTSPEED mode via Holtek receiver (VID 0x046D, PID 0x0ADF):
 //     Queries battery millivolts over the vendor collection (FF00:0001, 64-byte CRC-16/XMODEM
 //     frames carrying Airoha "PA" GET_BATTERY commands).
 #include "drivers.h"
 #include "logitech_g435_0adf.h"
+#include "logitech_g435_estimator.h"
 #include "../i18n.h"
 
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <devpkey.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
+#include <endpointvolume.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <dbt.h>
 
 #include <algorithm>
+#include <atomic>
+#include <ctime>
 #include <cwctype>
 #include <map>
+#include <mutex>
 
 namespace {
 
@@ -41,6 +57,8 @@ constexpr BYTE kCatOta = 0x06;
 constexpr BYTE kCatWireless = 0x0E;
 constexpr BYTE kGetMode = 0xE0;
 constexpr BYTE kSetMode = 0xE1;
+
+const wchar_t* kG435RegKey = L"Software\\WirelessBattery\\G435";
 
 // DEVPKEY_Device_BatteryLevel: {104EA319-6EE2-4701-BD47-8DDBF425BBE5}, pid 2 (DEVPROP_TYPE_BYTE, 0..100)
 const DEVPROPKEY kPropBatteryLevel = {
@@ -105,7 +123,7 @@ std::wstring ToLower(std::wstring s) {
     return s;
 }
 
-// Strict token match for "g435" so no unrelated Bluetooth device is ever associated with the G435.
+// Strict token match for "g435" so no unrelated Bluetooth or USB device is ever associated with the G435.
 bool IsG435BluetoothName(const std::wstring& name) {
     std::wstring low = ToLower(name);
     size_t pos = 0;
@@ -118,6 +136,219 @@ bool IsG435BluetoothName(const std::wstring& name) {
     }
     return false;
 }
+
+// ---- Registry Persistence for G435Estimator::State --------------------------------------------
+
+DWORD ReadRegDword(HKEY key, const wchar_t* name, DWORD defVal) {
+    DWORD v = defVal, sz = sizeof(v);
+    if (RegGetValueW(key, nullptr, name, RRF_RT_REG_DWORD, nullptr, &v, &sz) == ERROR_SUCCESS)
+        return v;
+    return defVal;
+}
+
+std::uint64_t ReadRegQword(HKEY key, const wchar_t* name, std::uint64_t defVal) {
+    std::uint64_t v = defVal;
+    DWORD sz = sizeof(v);
+    if (RegGetValueW(key, nullptr, name, RRF_RT_REG_QWORD, nullptr, &v, &sz) == ERROR_SUCCESS)
+        return v;
+    return defVal;
+}
+
+G435Estimator::State LoadEstimatorState() {
+    G435Estimator::State st;
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kG435RegKey, 0, KEY_READ, &k) != ERROR_SUCCESS)
+        return st;
+
+    st.calibrated               = ReadRegDword(k, L"Calibrated", 0) != 0;
+    st.promptShown              = ReadRegDword(k, L"PromptShown", 0) != 0;
+    DWORD pct                   = ReadRegDword(k, L"LastRealPercent", 0xFFFFFFFFu);
+    st.lastRealPercent          = (pct <= 100) ? static_cast<int>(pct) : -1;
+    st.lastRealTimestampSec     = ReadRegQword(k, L"LastRealTimestampSec", 0);
+    st.activeUsageSec           = ReadRegQword(k, L"ActiveUsageSec", 0);
+    st.learnedRateMilliPctPerHr = ReadRegDword(k, L"LearnedRateMilliPctPerHr", 0);
+    st.sampleCount              = ReadRegDword(k, L"SampleCount", 0);
+    st.lastPollTimestampSec     = ReadRegQword(k, L"LastPollTimestampSec", 0);
+    if (!st.calibrated || st.lastRealPercent < 0) {
+        st.calibrated = false;
+        st.lastRealPercent = -1;
+    }
+    RegCloseKey(k);
+    return st;
+}
+
+void SaveEstimatorState(const G435Estimator::State& st) {
+    HKEY k = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kG435RegKey, 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS)
+        return;
+
+    auto setDw = [&](const wchar_t* name, DWORD v) {
+        RegSetValueExW(k, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    };
+    auto setQw = [&](const wchar_t* name, std::uint64_t v) {
+        RegSetValueExW(k, name, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    };
+
+    setDw(L"Calibrated", st.calibrated ? 1u : 0u);
+    setDw(L"PromptShown", st.promptShown ? 1u : 0u);
+    setDw(L"LastRealPercent", st.lastRealPercent >= 0 ? static_cast<DWORD>(st.lastRealPercent) : 0xFFFFFFFFu);
+    setQw(L"LastRealTimestampSec", st.lastRealTimestampSec);
+    setQw(L"ActiveUsageSec", st.activeUsageSec);
+    setDw(L"LearnedRateMilliPctPerHr", st.learnedRateMilliPctPerHr);
+    setDw(L"SampleCount", st.sampleCount);
+    setQw(L"LastPollTimestampSec", st.lastPollTimestampSec);
+    RegCloseKey(k);
+}
+
+// ---- Passive HID Interrupt IN Monitor & WASAPI Audio Activity for Jieli 4C4A:4155 -------------
+
+std::atomic<ULONGLONG> g_lastHidEventTick{ 0 };
+std::mutex g_hidMonMutex;
+std::wstring g_hidMonPath;
+HANDLE g_hidMonThread = nullptr;
+
+DWORD WINAPI JieliHidMonitorThread(LPVOID) {
+    for (;;) {
+        std::wstring path;
+        {
+            std::lock_guard<std::mutex> lk(g_hidMonMutex);
+            path = g_hidMonPath;
+        }
+        if (path.empty()) {
+            Sleep(1000);
+            continue;
+        }
+
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            Sleep(2000);
+            continue;
+        }
+
+        HANDLE evt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        BYTE buf[16] = {};
+        while (evt != nullptr) {
+            OVERLAPPED ov{};
+            ov.hEvent = evt;
+            ResetEvent(evt);
+            DWORD got = 0;
+            BOOL ok = ReadFile(h, buf, 3, &got, &ov);
+            if (!ok) {
+                if (GetLastError() != ERROR_IO_PENDING) break;
+                DWORD w = WaitForSingleObject(evt, INFINITE);
+                if (w != WAIT_OBJECT_0 || !GetOverlappedResult(h, &ov, &got, FALSE)) break;
+            }
+            if (got > 0) {
+                g_lastHidEventTick.store(GetTickCount64());
+                if (HWND wnd = FindWindowW(L"WirelessBatteryWnd", nullptr)) {
+                    PostMessageW(wnd, WM_DEVICECHANGE, DBT_DEVICEARRIVAL, 0);
+                }
+            }
+        }
+        if (evt) CloseHandle(evt);
+        CloseHandle(h);
+        Sleep(1000);
+    }
+}
+
+void EnsureJieliHidMonitor(const std::wstring& path) {
+    std::lock_guard<std::mutex> lk(g_hidMonMutex);
+    g_hidMonPath = path;
+    if (!g_hidMonThread && !path.empty()) {
+        g_hidMonThread = CreateThread(nullptr, 0, JieliHidMonitorThread, nullptr, 0, nullptr);
+    }
+}
+
+struct G435UsbAudioState {
+    bool endpointPresent = false;
+    bool sessionActive   = false;
+    bool peakActive      = false;
+};
+
+// Inspects active Windows audio render/capture endpoints belonging to the G435 USB receiver
+// (excluding Bluetooth BTHENUM/BTHHFENUM endpoints) to detect active audio sessions or signal peaks.
+G435UsbAudioState QueryG435UsbAudioActivity() {
+    G435UsbAudioState out;
+    HRESULT hrInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool needUninit = SUCCEEDED(hrInit);
+
+    IMMDeviceEnumerator* pEnum = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                                  __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&pEnum));
+    if (SUCCEEDED(hr) && pEnum) {
+        IMMDeviceCollection* pColl = nullptr;
+        if (SUCCEEDED(pEnum->EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE, &pColl)) && pColl) {
+            UINT count = 0;
+            pColl->GetCount(&count);
+            for (UINT i = 0; i < count; i++) {
+                IMMDevice* pDev = nullptr;
+                if (FAILED(pColl->Item(i, &pDev)) || !pDev) continue;
+
+                IPropertyStore* pProps = nullptr;
+                std::wstring friendlyName;
+                if (SUCCEEDED(pDev->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
+                    PROPVARIANT pv;
+                    PropVariantInit(&pv);
+                    if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &pv)) && pv.vt == VT_LPWSTR && pv.pwszVal) {
+                        friendlyName = pv.pwszVal;
+                    }
+                    PropVariantClear(&pv);
+                    pProps->Release();
+                }
+
+                // Exclude Bluetooth audio endpoints (which contain "Hands-Free" or Bluetooth adapter names)
+                std::wstring lowName = ToLower(friendlyName);
+                bool isBtAudio = (lowName.find(L"hands-free") != std::wstring::npos) ||
+                                 (lowName.find(L"bth") != std::wstring::npos);
+
+                if (IsG435BluetoothName(friendlyName) && !isBtAudio) {
+                    out.endpointPresent = true;
+
+                    IAudioMeterInformation* pMeter = nullptr;
+                    if (SUCCEEDED(pDev->Activate(__uuidof(IAudioMeterInformation), CLSCTX_INPROC_SERVER,
+                                                 nullptr, reinterpret_cast<void**>(&pMeter))) && pMeter) {
+                        float peak = 0.0f;
+                        if (SUCCEEDED(pMeter->GetPeakValue(&peak)) && peak > 0.0001f) {
+                            out.peakActive = true;
+                        }
+                        pMeter->Release();
+                    }
+
+                    IAudioSessionManager2* pSessMgr = nullptr;
+                    if (SUCCEEDED(pDev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_INPROC_SERVER,
+                                                 nullptr, reinterpret_cast<void**>(&pSessMgr))) && pSessMgr) {
+                        IAudioSessionEnumerator* pSessEnum = nullptr;
+                        if (SUCCEEDED(pSessMgr->GetSessionEnumerator(&pSessEnum)) && pSessEnum) {
+                            int sessCount = 0;
+                            pSessEnum->GetCount(&sessCount);
+                            for (int s = 0; s < sessCount; s++) {
+                                IAudioSessionControl* pCtrl = nullptr;
+                                if (SUCCEEDED(pSessEnum->GetSession(s, &pCtrl)) && pCtrl) {
+                                    AudioSessionState st = AudioSessionStateInactive;
+                                    if (SUCCEEDED(pCtrl->GetState(&st)) && st == AudioSessionStateActive) {
+                                        out.sessionActive = true;
+                                    }
+                                    pCtrl->Release();
+                                }
+                            }
+                            pSessEnum->Release();
+                        }
+                        pSessMgr->Release();
+                    }
+                }
+                pDev->Release();
+            }
+            pColl->Release();
+        }
+        pEnum->Release();
+    }
+
+    if (needUninit) CoUninitialize();
+    return out;
+}
+
+// ---- Bluetooth (HFP / DEVPKEY_Device_BatteryLevel) Query --------------------------------------
 
 std::wstring ReadDeviceStringProp(HDEVINFO di, SP_DEVINFO_DATA* dd, const DEVPROPKEY& key) {
     DEVPROPTYPE t = 0;
@@ -237,9 +468,19 @@ G435BtState QueryG435Bluetooth() {
     return out;
 }
 
+// Runtime transition tracking across polls (worker thread).
+bool g_firstPollDone   = false;
+bool g_wasBtConnected  = false;
+bool g_wasJieliPresent = false;
+ULONGLONG g_lastTransitionTick = 0;
+
 }  // namespace
 
 void PollLogitechG435(PollContext& ctx) {
+    const std::uint64_t nowSec = static_cast<std::uint64_t>(std::time(nullptr));
+    const ULONGLONG nowTick = GetTickCount64();
+    G435Estimator::State estState = LoadEstimatorState();
+
     // 1. Check Bluetooth (HFP / DEVPKEY_Device_BatteryLevel) for the G435 first.
     G435BtState bt = QueryG435Bluetooth();
     if (!bt.containerId.empty()) {
@@ -247,12 +488,37 @@ void PollLogitechG435(PollContext& ctx) {
         ctx.btContainers.insert(bt.containerId);
     }
 
+    auto jieliColls = ctx.Find(0x4C4A, 0x4155, [](const HidColl& c) {
+        return c.page() == 0x000C && c.usage() == 0x0001;
+    });
+    const bool jieliPresent = !jieliColls.empty();
+    EnsureJieliHidMonitor(jieliPresent ? jieliColls[0]->path : L"");
+
+    if (g_firstPollDone) {
+        // Detect user switching headset from Bluetooth back to LIGHTSPEED, or hotplugging the USB receiver.
+        if ((g_wasBtConnected && !bt.connected && jieliPresent) || (!g_wasJieliPresent && jieliPresent)) {
+            g_lastTransitionTick = nowTick;
+        }
+    }
+    g_firstPollDone = true;
+    g_wasBtConnected = (bt.paired && bt.connected);
+    g_wasJieliPresent = jieliPresent;
+
     // If the G435 is actively connected over Bluetooth right now, report the unified device in
-    // Bluetooth mode with its real HFP battery percentage, and claim the USB dongle IDs so a
-    // plugged-in receiver does not create a second entry.
+    // Bluetooth mode with its real HFP battery percentage, update calibration/learning in the
+    // Registry, and claim the USB dongle IDs so a plugged-in receiver never creates a second entry.
     if (bt.paired && bt.connected) {
+        g_lastTransitionTick = 0;
         ctx.claimed.insert({ 0x046D, 0x0ADF });
         ctx.claimed.insert({ 0x4C4A, 0x4155 });
+
+        bool dirty = false;
+        if (bt.percent >= 0) {
+            dirty |= G435Estimator::RecordBluetoothReading(estState, bt.percent, nowSec);
+        } else {
+            dirty |= G435Estimator::AccumulateUsage(estState, true, nowSec);
+        }
+        if (dirty) SaveEstimatorState(estState);
 
         DeviceStatus s;
         s.key = L"g435";
@@ -260,7 +526,11 @@ void PollLogitechG435(PollContext& ctx) {
         s.kind = DeviceKind::Headset;
         s.via = L"Bluetooth";
         s.connected = true;
-        s.percent = bt.percent;  // real 0..100% from DEVPKEY_Device_BatteryLevel, or -1 if not provided
+        s.estimated = false;
+        s.percent = bt.percent;  // real 0..100% from DEVPKEY_Device_BatteryLevel
+        if (bt.percent >= 0) {
+            s.detail = Tr(StrId::G435BatteryRealBt);
+        }
         ctx.out.push_back(s);
         return;
     }
@@ -275,42 +545,93 @@ void PollLogitechG435(PollContext& ctx) {
             if (!d.Open(*coll)) continue;
 
             int mv = ReadMillivoltsAdf(d);
+            ctx.claimed.insert({ 0x046D, 0x0ADF });
+            if (mv < 0) {
+                // Headset is turned off / disconnected from the 0ADF receiver: hide the icon.
+                if (G435Estimator::AccumulateUsage(estState, false, nowSec)) SaveEstimatorState(estState);
+                return;
+            }
+
+            int realPct = G435Adf::Percent(mv);
+            if (G435Estimator::RecordBluetoothReading(estState, realPct, nowSec)) SaveEstimatorState(estState);
+
             DeviceStatus s;
             s.key = L"g435";
             s.name = L"Logitech G435";
             s.kind = DeviceKind::Headset;
             s.via = L"LIGHTSPEED";
-
-            if (mv < 0) {
-                s.connected = false;
-                ctx.Add(s, 0x046D, 0x0ADF);
-                return;
-            }
             s.millivolts = mv;
-            s.percent = G435Adf::Percent(mv);
+            s.percent = realPct;
             s.connected = true;
-            ctx.Add(s, 0x046D, 0x0ADF);
+            s.estimated = false;
+            ctx.out.push_back(s);
             return;
         }
     }
 
-    // 3. Jieli 4C4A:4155 LIGHTSPEED receiver (unified identity "g435", no invented/estimated percent).
-    if (!ctx.IsClaimed(0x4C4A, 0x4155)) {
-        auto colls = ctx.Find(0x4C4A, 0x4155, [](const HidColl& c) {
-            return c.page() == 0x000C && c.usage() == 0x0001;
-        });
-        if (!colls.empty()) {
-            DeviceStatus s;
-            s.key = L"g435";
-            s.name = L"Logitech G435";
-            s.kind = DeviceKind::Headset;
-            s.via = L"LIGHTSPEED";
-            s.connected = true;
-            s.percent = -1;
-            s.detail = Tr(StrId::G435JieliNoTelemetry);
-            ctx.Add(s, 0x4C4A, 0x4155);
+    // 3. Jieli 4C4A:4155 LIGHTSPEED receiver.
+    // Do NOT treat the mere presence of the USB receiver as proof that the headset is connected.
+    // Verify active connection/usage via WASAPI USB audio session/meter activity, passive EP 0x82
+    // HID button events, or a recent mode switch / hotplug transition.
+    if (!ctx.IsClaimed(0x4C4A, 0x4155) && jieliPresent) {
+        ctx.claimed.insert({ 0x4C4A, 0x4155 });
+
+        G435UsbAudioState audio = QueryG435UsbAudioActivity();
+        ULONGLONG lastHid = g_lastHidEventTick.load();
+        bool recentHidButton  = (lastHid > 0) && (nowTick >= lastHid) && (nowTick - lastHid <= 90 * 1000ULL);
+        bool recentTransition = (g_lastTransitionTick > 0) && (nowTick >= g_lastTransitionTick) &&
+                                (nowTick - g_lastTransitionTick <= 90 * 1000ULL);
+
+        bool activelyInUse = audio.peakActive || audio.sessionActive || recentHidButton;
+        bool lightspeedConnected = activelyInUse || recentTransition;
+
+        if (!lightspeedConnected) {
+            // Headset is disconnected or turned off: do not discount battery and do not show the icon.
+            if (G435Estimator::AccumulateUsage(estState, false, nowSec)) SaveEstimatorState(estState);
+            return;
         }
+
+        // Accumulate usage strictly when there is evidence of active use (audio stream/peak or button events).
+        bool dirty = G435Estimator::AccumulateUsage(estState, activelyInUse, nowSec);
+        G435Estimator::Evaluation ev = G435Estimator::EvaluateLightspeed(estState);
+        if (ev.showCalibrationPrompt) dirty = true;
+        if (dirty) SaveEstimatorState(estState);
+
+        DeviceStatus s;
+        s.key = L"g435";
+        s.name = L"Logitech G435";
+        s.kind = DeviceKind::Headset;
+        s.via = L"LIGHTSPEED";
+        s.connected = true;
+        s.percent = ev.percent;
+        s.estimated = ev.estimated;
+        if (ev.showCalibrationPrompt) {
+            s.calibrateMsg = Tr(StrId::G435CalibratePrompt);
+        }
+
+        switch (ev.kind) {
+            case G435Estimator::ReadingKind::Unknown:
+                s.detail = Tr(StrId::G435CalibratePrompt);
+                break;
+            case G435Estimator::ReadingKind::ReferenceOnly:
+                s.levelText = L"~" + std::to_wstring(ev.percent) + L"%";
+                s.detail = Tr(StrId::G435BatteryReferenceBt);
+                break;
+            case G435Estimator::ReadingKind::Estimated:
+                s.levelText = L"~" + std::to_wstring(ev.percent) + L"%";
+                s.detail = std::wstring(Tr(StrId::G435BatteryEstimated)) + L", ref. " +
+                           std::to_wstring(ev.referencePercent) + L"% BT";
+                break;
+            case G435Estimator::ReadingKind::RealBluetooth:
+                s.detail = Tr(StrId::G435BatteryRealBt);
+                break;
+        }
+        ctx.out.push_back(s);
+        return;
     }
+
+    // Disconnected on all transports: stop usage accumulation while preserving calibration history.
+    if (G435Estimator::AccumulateUsage(estState, false, nowSec)) SaveEstimatorState(estState);
 }
 
 std::wstring DumpG435Diagnostics() {
@@ -398,6 +719,25 @@ std::wstring DumpG435Diagnostics() {
         }
     }
 
-    if (banner) out += L"------------------------------------\n";
+    G435UsbAudioState audio = QueryG435UsbAudioActivity();
+    if (audio.endpointPresent) {
+        if (!banner) {
+            out += L"\n--- Logitech G435 Hardware Probe ---\n";
+            banner = true;
+        }
+        out += std::wstring(L"USB Audio Endpoint: Present=YES SessionActive=") +
+               (audio.sessionActive ? L"YES" : L"NO") + L" PeakActive=" +
+               (audio.peakActive ? L"YES" : L"NO") + L"\n";
+    }
+
+    G435Estimator::State est = LoadEstimatorState();
+    if (banner) {
+        out += L"Calibration State: Calibrated=" + std::wstring(est.calibrated ? L"YES" : L"NO") +
+               L" LastReal=" + (est.lastRealPercent >= 0 ? std::to_wstring(est.lastRealPercent) + L"%" : L"N/A") +
+               L" ActiveUsageSec=" + std::to_wstring(est.activeUsageSec) +
+               L" LearnedRateMilliPctPerHr=" + std::to_wstring(est.learnedRateMilliPctPerHr) +
+               L" Samples=" + std::to_wstring(est.sampleCount) + L"\n";
+        out += L"------------------------------------\n";
+    }
     return out;
 }

@@ -23,7 +23,9 @@ constexpr UINT WM_RESULTS = WM_APP + 2;
 constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
+constexpr UINT_PTR TIMER_CALIBRATE_CLEANUP = 3;
 constexpr UINT PLACEHOLDER_ID = 1;
+constexpr UINT CALIBRATE_NOTIFY_ID = 2;
 
 int g_lowBatteryThreshold = 15;
 DWORD g_pollIntervalMs = 60 * 1000;
@@ -59,6 +61,7 @@ struct TrayEntry {
     ULONGLONG lastSeen = 0;
     bool added = false;
     bool lowWarned = false;
+    bool calibratePrompted = false;
     std::wstring iconSig;    // what the current icon shows, to avoid needless redraws
     HICON icon = nullptr;
 };
@@ -289,14 +292,14 @@ HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barCol
 
 Rgb Foreground() { return g_lightTaskbar ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }; }
 
-HICON IconFor(int pct, bool charging, bool dim) {
+HICON IconFor(int pct, bool charging, bool dim, bool estimated = false) {
     Rgb fg = Foreground();
     Rgb bar = charging                   ? Rgb{ 0, 170, 255 }
             : pct <= g_lowBatteryThreshold ? Rgb{ 232, 32, 48 }
             : pct <= 30                  ? Rgb{ 255, 150, 0 }
                                          : Rgb{ 30, 190, 90 };
     Rgb text = (!charging && pct >= 0 && pct <= g_lowBatteryThreshold) ? Rgb{ 240, 50, 60 } : fg;
-    std::wstring t = pct < 0 ? L"?" : std::to_wstring(pct);
+    std::wstring t = pct < 0 ? L"?" : (estimated ? L"~" + std::to_wstring(pct) : std::to_wstring(pct));
     return RenderIcon(t, pct, text, bar, dim);
 }
 
@@ -323,7 +326,7 @@ std::wstring StatusText(const TrayEntry& e) {
 }
 
 void TrayCall(DWORD msg, UINT uid, HICON icon, const std::wstring& tip, const wchar_t* infoTitle = nullptr,
-              const std::wstring& info = L"") {
+              const std::wstring& info = L"", DWORD infoFlags = NIIF_WARNING) {
     NOTIFYICONDATAW nid{ sizeof(nid) };
     nid.hWnd = g_hwnd;
     nid.uID = uid;
@@ -335,7 +338,7 @@ void TrayCall(DWORD msg, UINT uid, HICON icon, const std::wstring& tip, const wc
         nid.uFlags |= NIF_INFO;
         CopyTip(nid.szInfoTitle, ARRAYSIZE(nid.szInfoTitle), infoTitle);
         CopyTip(nid.szInfo, ARRAYSIZE(nid.szInfo), info);
-        nid.dwInfoFlags = NIIF_WARNING;
+        nid.dwInfoFlags = infoFlags;
     }
     Shell_NotifyIconW(msg, &nid);
     if (msg == NIM_ADD) {
@@ -374,27 +377,40 @@ void ApplyEntry(TrayEntry& e) {
     bool visible = s.connected && !g_useWidget && !IsEntryHidden(e);
     if (!visible) {
         if (e.added) { TrayDelete(e.uid); e.added = false; }
+        if (s.connected && g_useWidget && !IsEntryHidden(e) && !s.calibrateMsg.empty() && !e.calibratePrompted) {
+            e.calibratePrompted = true;
+            if (!g_placeholderIcon) g_placeholderIcon = RenderIcon(L"?", -1, Foreground(), Foreground(), true);
+            TrayCall(NIM_ADD, CALIBRATE_NOTIFY_ID, g_placeholderIcon, s.name, Tr(StrId::G435CalibrateTitle), s.calibrateMsg, NIIF_INFO);
+            SetTimer(g_hwnd, TIMER_CALIBRATE_CLEANUP, 8000, nullptr);
+        }
         return;
     }
     int shown = s.percent >= 0 ? s.percent : e.lastPct;
-    bool dim = s.percent < 0;
-    std::wstring sig = std::to_wstring(shown) + (s.charging ? L"c" : L"") + (dim ? L"d" : L"") + (g_lightTaskbar ? L"l" : L"k");
+    bool dim = s.percent < 0 || s.estimated;
+    std::wstring sig = std::to_wstring(shown) + (s.charging ? L"c" : L"") + (dim ? L"d" : L"") +
+                       (s.estimated ? L"e" : L"") + (g_lightTaskbar ? L"l" : L"k");
     if (sig != e.iconSig || !e.icon) {
         if (e.icon) DestroyIcon(e.icon);
-        e.icon = IconFor(shown, s.charging, dim);
+        e.icon = IconFor(shown, s.charging, dim, s.estimated);
         e.iconSig = sig;
     }
     std::wstring tip = s.name + L"\n" + StatusText(e);
 
     const wchar_t* infoTitle = nullptr;
     std::wstring info;
+    DWORD infoFlags = NIIF_WARNING;
     if (s.charging || shown > g_lowBatteryThreshold + 10) e.lowWarned = false;
     if (!s.charging && s.percent >= 0 && s.percent <= g_lowBatteryThreshold && !e.lowWarned) {
         e.lowWarned = true;
         infoTitle = Tr(StrId::LowBattery);
         info = FormatLowBattery(s.name, s.percent);
+    } else if (!s.calibrateMsg.empty() && !e.calibratePrompted) {
+        e.calibratePrompted = true;
+        infoTitle = Tr(StrId::G435CalibrateTitle);
+        info = s.calibrateMsg;
+        infoFlags = NIIF_INFO;
     }
-    TrayCall(e.added ? NIM_MODIFY : NIM_ADD, e.uid, e.icon, tip, infoTitle, info);
+    TrayCall(e.added ? NIM_MODIFY : NIM_ADD, e.uid, e.icon, tip, infoTitle, info, infoFlags);
     e.added = true;
 }
 
@@ -426,7 +442,7 @@ void UpdateWidget() {
         it.percent = e->st.percent >= 0 ? e->st.percent : e->lastPct;
         if (e->st.percent >= 0) it.text = e->st.levelText;
         it.charging = e->st.charging;
-        it.dim = e->st.percent < 0;
+        it.dim = e->st.percent < 0 || e->st.estimated;
         it.low = !it.charging && it.percent >= 0 && it.percent <= g_lowBatteryThreshold;
         it.bluetooth = e->st.via == L"Bluetooth";
         items.push_back(it);
@@ -443,7 +459,7 @@ void OnResults(std::vector<DeviceStatus>& results) {
         auto& e = g_entries[s.key];
         if (!e.uid) e.uid = StableId(s.key);
         e.st = s;
-        if (s.percent >= 0) e.lastPct = s.percent;
+        if (s.percent >= 0 && !s.estimated) e.lastPct = s.percent;
         e.lastSeen = GetTickCount64();
         seen[s.key] = true;
         ApplyEntry(e);
@@ -670,6 +686,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == TIMER_DEBOUNCE) { KillTimer(h, TIMER_DEBOUNCE); SetEvent(g_refreshEvt); }
             if (wp == TIMER_WIDGET) Reconcile();
+            if (wp == TIMER_CALIBRATE_CLEANUP) { KillTimer(h, TIMER_CALIBRATE_CLEANUP); TrayDelete(CALIBRATE_NOTIFY_ID); }
             return 0;
         case WM_SETTINGCHANGE:
             if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) {
@@ -687,6 +704,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (e.icon) DestroyIcon(e.icon);
             }
             if (g_placeholder) TrayDelete(PLACEHOLDER_ID);
+            TrayDelete(CALIBRATE_NOTIFY_ID);
             PostQuitMessage(0);
             return 0;
     }

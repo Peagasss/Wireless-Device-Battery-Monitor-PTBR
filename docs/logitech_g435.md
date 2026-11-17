@@ -5,13 +5,17 @@
 The Logitech G435 supports two wireless connection modes: **LIGHTSPEED** (via its USB receiver, model `A00150`) and **Bluetooth**.
 
 In this project, the G435 is represented under a **single unified logical identity** (`key = "g435"`, `name = "Logitech G435"`):
-- **Bluetooth mode (Primary battery telemetry path):** Reads the real battery percentage (`0–100%`) reported by the headset over the Bluetooth Hands-Free Profile (HFP) and cached by Windows in `DEVPKEY_Device_BatteryLevel` (`{104EA319-6EE2-4701-BD47-8DDBF425BBE5}, pid 2`), following the approach demonstrated in [jenesei-software/gearhub](https://github.com/jenesei-software/gearhub).
-- **LIGHTSPEED mode via Jieli receiver (`4C4A:4155`):** Recognizes the receiver (`UsagePage 0x000C, Usage 0x0001`), displays the headset as connected via `LIGHTSPEED` with `percent = -1` and status `"Bateria indisponível via LIGHTSPEED"` (`"Battery unavailable via LIGHTSPEED"`), and preserves the last valid battery percentage obtained via Bluetooth (`lastPct`). Direct battery polling over the Jieli USB receiver is **on hold** (not permanently abandoned; see Section 3 for preserved hardware findings and future research avenues).
+- **Connection Visibility:** The G435 icon is hidden whenever the headset is disconnected, and immediately removed when turned off or disconnected. On the Jieli `4C4A:4155` receiver, mere USB receiver presence is **not** treated as headset connection; instead, active connection and usage are verified via WASAPI audio session/meter activity on the G435 USB audio endpoints, passive Consumer Control input reports on `EP 0x82` (`000C:0001`), or a recent mode transition.
+- **Bluetooth mode (Primary real battery telemetry & calibration path):** Reads the real battery percentage (`0–100%`) reported by the headset over the Bluetooth Hands-Free Profile (HFP) and cached by Windows in `DEVPKEY_Device_BatteryLevel` (`{104EA319-6EE2-4701-BD47-8DDBF425BBE5}, pid 2`), following the approach demonstrated in [jenesei-software/gearhub](https://github.com/jenesei-software/gearhub). Each Bluetooth reading calibrates or recalibrates the persistent estimator in `HKCU\Software\WirelessBattery\G435`.
+- **LIGHTSPEED mode via Jieli receiver (`4C4A:4155`) with Adaptive Heuristic Estimation:** Direct battery polling over the Jieli USB receiver is **on hold** (not permanently abandoned; see Section 3 for preserved hardware findings). While connected via LIGHTSPEED on `4C4A:4155`:
+  - **Uncalibrated (first connection without any prior Bluetooth reading):** Displays `?` (unknown, `percent = -1`, never a fake percentage) and prompts the user to connect via Bluetooth once to record the initial reference reading.
+  - **Calibrated with 1 reading (`ReferenceOnly`):** Displays the last real Bluetooth percentage prefixed with `~` (e.g. `~80%`, dimmed) as a reference without inventing a fixed discharge rate.
+  - **Calibrated with 2+ readings (`Estimated`):** Learns the headset's discharge rate from observed battery drop across accumulated active usage time (`dropPct / activeHours`), and estimates the remaining percentage (`~XX%`, dimmed) strictly during confirmed active usage. Battery is never discounted while the headset is off, disconnected, or idle.
 - **LIGHTSPEED mode via Holtek receiver (`046D:0ADF`):** Queries battery voltage in millivolts over the `FF00:0001` vendor collection using CRC-16/XMODEM framed Airoha `"PA"` commands.
 
 ---
 
-## 2. Unified Identity and Bluetooth HFP Implementation
+## 2. Unified Identity, Calibration, and Adaptive Estimation (`src/drivers/logitech_g435_estimator.h`)
 
 ### 2.1. Bluetooth HFP Detection (`QueryG435Bluetooth`)
 1. Enumerates present `BTHENUM\`, `BTHLE\`, and `BTHLEDEVICE\` device nodes grouped by `DEVPKEY_Device_ContainerId`.
@@ -20,9 +24,11 @@ In this project, the G435 is represented under a **single unified logical identi
 4. Reads `DEVPKEY_Device_BatteryLevel` (`{104EA319-6EE2-4701-BD47-8DDBF425BBE5}, pid 2`, `DEVPROP_TYPE_BYTE`) from the Hands-Free Audio Gateway service node (`{0000111E-0000-1000-8000-00805F9B34FB}`), validating `pct <= 100`.
 5. Registers the G435 Bluetooth `ContainerId` in `ctx.btContainers` so `PollBluetooth` in `src/drivers/generic.cpp` never creates a duplicate entry.
 
-### 2.2. Mode Switching Behavior
-- **Connected via Bluetooth:** Even if the USB LIGHTSPEED receiver (`4C4A:4155` or `046D:0ADF`) remains plugged into a USB port, `PollLogitechG435` claims the USB receiver IDs and reports a single `Logitech G435` entry with `via = "Bluetooth"` and the real battery percentage (`0–100%`).
-- **Returning to LIGHTSPEED (`4C4A:4155`):** When the user switches the headset back to LIGHTSPEED, the same `"g435"` entry transitions to `via = "LIGHTSPEED"`, retains `lastPct` from the Bluetooth reading, and displays `"Bateria indisponível via LIGHTSPEED"`.
+### 2.2. Visual Distinction of Reading Types & Registry Persistence (`HKCU\Software\WirelessBattery\G435`)
+- **Real Battery (`RealBluetooth`):** Full brightness percentage (`80%`) with detail `"bateria real"` (`"real battery"`).
+- **Estimated / Reference Battery (`ReferenceOnly` / `Estimated`):** Dimmed percentage prefixed with `~` (`~75%`) and detail `"referência Bluetooth — aguardando mais leituras para taxa de descarga"` or `"bateria estimada, ref. XX% BT"`.
+- **Unknown Battery (`Unknown`):** Dimmed `?` (`percent = -1`) with calibration instruction `"Conecte seu Logitech G435 via Bluetooth para realizar a primeira leitura da bateria. Depois disso, poderemos estimar o nível de carga durante o uso via LIGHTSPEED."`
+- **Persistence:** `Calibrated`, `PromptShown`, `LastRealPercent`, `LastRealTimestampSec`, `ActiveUsageSec`, `LearnedRateMilliPctPerHr`, `SampleCount`, and `LastPollTimestampSec` are persisted in `HKCU\Software\WirelessBattery\G435` across application restarts and disconnections.
 
 ---
 

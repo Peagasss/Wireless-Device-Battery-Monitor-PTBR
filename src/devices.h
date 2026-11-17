@@ -16,8 +16,10 @@ struct DeviceStatus {
     bool charging   = false;
     bool asleep     = false;   // receiver answered but the device is sleeping (keep last value)
     bool connected  = true;    // false: receiver present, device switched off (hidden)
+    bool estimated  = false;   // true: heuristic or reference battery estimate (not a live direct reading)
     int  millivolts = 0;       // battery voltage when reported (0 = unknown)
     int  graceSec   = 0;       // keep showing the last value this long if the device stops answering
+    std::wstring calibrateMsg; // one-time calibration instruction when first connected without reference
 };
 
 // Queries every supported device. Blocking (can take a second or two); call from a worker thread.
