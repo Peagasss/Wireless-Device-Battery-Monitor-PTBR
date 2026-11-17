@@ -25,11 +25,39 @@ Battery levels of your wireless mouse, headset, keyboard and controller, right o
 
 Hover for details. Click for the menu: every device (click one to hide or show it), display mode, *Refresh now*, *Start with Windows*, and *Exit*. Levels refresh every 60 seconds, and right away when a device is plugged in or the PC wakes up.
 
+## Enhancements in this Fork
+
+This fork introduces architectural and feature improvements to expand peripheral compatibility and battery insights while maintaining a lightweight footprint:
+
+- **Battery Intelligence Engine:**
+  - **Per-Device Isolated History:** Tracks each device under `HKCU\Software\WirelessBattery\Devices\<key>`, preventing state contamination between different peripherals.
+  - **Adaptive Consumption Learning:** Learns discharge rates (%/hour) using an exponential moving average (EMA) based strictly on confirmed active usage time. Unmonitored gaps, off periods, and charging sessions are safely isolated and do not distort consumption rates.
+  - **Remaining Runtime Estimation:** Calculates and displays estimated battery life (e.g., `75% · ~12h remaining` or `~75% · ~12h remaining`) when sufficient history is available.
+  - **Confidence Assessment:** Computes statistical confidence (`Insufficient`, `Low`, `Medium`, `High`) based on sample count, monitored usage duration, and rate deviation.
+  - **Persistent Calibration:** Survives application restarts and device reconnections without losing learned discharge trends.
+- **Logitech G435 Dual-Mode & Adaptive Monitoring:**
+  - **Unified Logical Identity:** Merges LIGHTSPEED and Bluetooth modes into a single device key (`"g435"`), preventing duplicate tray or widget icons.
+  - **Strict Connection Visibility:** The icon is immediately removed when the headset is turned off or disconnected. On the Jieli receiver (`4C4A:4155`), connection is verified via WASAPI audio session/meter activity and a passive HID button listener, rather than assuming connection merely from USB receiver presence.
+  - **Bluetooth HFP Telemetry:** Reads real battery levels directly from Windows Hands-Free Audio Gateway properties (`DEVPKEY_Device_BatteryLevel`).
+  - **First-Time Calibration Prompt:** Guides the user to connect once via Bluetooth to capture an initial reference when first used on LIGHTSPEED.
+  - **Adaptive Heuristic on LIGHTSPEED:** Uses Bluetooth readings as reference and estimates discharge during active LIGHTSPEED usage. *(Note: During LIGHTSPEED mode on the Jieli receiver, battery is adaptively estimated, not read directly from the USB dongle).*
+- **Universal Charging State Normalization:**
+  - Standardizes charging states across all drivers into five normalized states: `Charging`, `Discharging`, `Full`, `Idle`, and `Unknown`.
+  - The charging bolt (`⚡`) is displayed strictly when active charging is confirmed by device protocol or OS power reporting (`Windows.Gaming.Input`, `GUID_DEVINTERFACE_BATTERY`, or HID Battery System `0x85`).
+  - Never assumes charging solely from USB cable attachment or percentage increases between polls.
+- **Enhanced Compatibility & Telemetry Sources:**
+  - Integrates HID Battery System usages (`0x44` Charging, `0x45` Discharging, `0x46` Full, `0xD0` AC Present), Windows Battery class driver reports, and enhanced vendor charging states (Logitech, Corsair, Sprime, XInput/WGI, etc.).
+- **Engineering Quality & Automation:**
+  - Automated unit test suite (`tests/battery_intelligence_test.cpp`, `tests/logitech_g435_0adf_test.cpp`, protocol tests, driver tests).
+  - Code signing infrastructure (`scripts/sign-binaries.ps1`, `scripts/verify-signatures.ps1`, `docs/code_signing.md`) supporting Authenticode SHA-256 and RFC 3161 timestamping for Windows Smart App Control compliance when configured with trusted CA credentials.
+  - Multi-compiler support (MSVC `build-msvc.bat` and MinGW `build.bat` / `Makefile`).
+  - Runtime settings and internationalization (English and Brazilian Portuguese).
+
 ## Supported devices
 
 | Vendor | Devices | How |
 |---|---|---|
-| **Logitech** | Mice and keyboards on Unifying, Bolt, Lightspeed (including the PRO X3 SUPERSTRIKE dongle `046D:C54F`) and Nano receivers, over USB or Bluetooth; G headsets (G533, G535, G633/G635/G733/G933/G935, G PRO/PRO X); G435 on the newer `046D:0ADF` dongle | HID++ 1.0 / 2.0 with feature discovery: unified battery, battery level, voltage, ADC; G435: CRC-16 framed vendor reports, `GET_BATTERY` in mV |
+| **Logitech** | Mice and keyboards on Unifying, Bolt, Lightspeed (including the PRO X3 SUPERSTRIKE dongle `046D:C54F`) and Nano receivers, over USB or Bluetooth; G headsets (G533, G535, G633/G635/G733/G933/G935, G PRO/PRO X); G435 on `046D:0ADF` (direct voltage query) and `4C4A:4155` (Jieli receiver, connection monitoring + Bluetooth HFP calibration and adaptive estimation) | HID++ 1.0 / 2.0 with feature discovery: unified battery, battery level, voltage, ADC; G435: CRC-16 framed vendor reports on `0ADF`, unified Bluetooth HFP telemetry and adaptive estimation on `4155` |
 | **Razer** | Wireless mice, keyboards and dongles; BlackShark V2 HyperSpeed, V2 Pro (2023), V3 / V3 Pro / V3 X headsets; Barracuda X (2022) on its 2.4 GHz receiver (`1532:0550`) | Razer feature-report protocol; BlackShark vendor protocols (V3 / V3 Pro / V3 X queried every 5 min); Barracuda X: Airoha battery and cable queries through the receiver |
 | **SteelSeries** | Arctis 1/7/7+/9/Pro/Pro Wireless, Arctis Nova 3P/5/7/7X/7P/Pro Wireless, GameBuds; Aerox 3/5/9 Wireless, Prime Wireless, Rival 3 Wireless (Gen 2), Rival 650, Rival Pro | Vendor HID reports |
 | **SteelSeries** | Arctis 1/7/7+/9/Pro/Pro Wireless, Arctis Nova 3P/5/7/7X/7P/Pro Wireless (including `1038:225D`), GameBuds; Aerox 3/5/9 Wireless, Prime Wireless, Rival 3 Wireless (Gen 2), Rival 650, Rival Pro | Vendor HID reports |
@@ -144,6 +172,7 @@ just lose the extra headsets.
 - **Sleeping devices:** a device that is asleep may not answer. Its last value stays visible, dimmed. Logitech receivers drop sleeping devices from the link, so their last value is kept for 30 minutes.
 - **Keychron keyboards:** they only report their battery over Bluetooth (shown via the Bluetooth support). Over the 2.4 GHz receiver the firmware does not expose it. Keychron mice are supported.
 - **Baseus AeQur GH02 headset:** the 2.4 GHz dongle (`10D6:4802`, Actions chip) only carries audio, media keys and the chip's firmware-update channel, not the battery. Connect the headset over Bluetooth to see its level (shown via the Bluetooth support when Windows reports one).
+- **Logitech G435 (Jieli `4C4A:4155` receiver):** the Jieli USB receiver does not expose battery telemetry over its USB HID interface. Battery level is read directly when connected over Bluetooth (HFP), and estimated adaptively during active LIGHTSPEED usage once calibrated. The percentage shown during LIGHTSPEED mode is an adaptive estimate, not a direct measurement from the receiver.
 - **Rapoo:** supported VT mice push their status, so a refresh can wait up to 4 seconds per matching interface. Sleeping mice may stay dimmed with their last reading for up to 30 minutes. Support is for Nordic 54L report `07` and legacy VT3 Pro `BB`; CH584 report `08`, office MT/M-series mice and other firmware protocols are not covered by this driver.
 - **Rapoo:** supported VT mice push their status, so a refresh can wait up to 4 seconds per matching interface. Sleeping mice may stay dimmed with their last reading for up to 30 minutes. Support is for Nordic 54L report `07` and legacy `BB` (VT3 Pro, VT1 Pro Max); CH584 report `08`, office MT/M-series mice and other firmware protocols are not covered by this driver.
 - **Flydigi:** this driver targets Vader 5 Pro only; Bluetooth and other Flydigi models are not covered. Percentages represent coarse battery levels. The implementation follows SDL and Windows hardware traces; local hardware validation is pending.
