@@ -129,14 +129,22 @@ bool ReadBattery20(Hidpp& h, BYTE idx, USHORT pid, DeviceStatus& s) {
                 s.percent = (level & 8) ? 100 : (level & 4) ? 60 : (level & 2) ? 20 : 5;
                 s.levelText = (level & 8) ? L"Full" : (level & 4) ? L"Good" : (level & 2) ? L"Low" : L"Critical";
             }
-            s.charging = st == 1 || st == 2 || st == 3;
+            s.charging = st == 1 || st == 2;
+            s.chargeState = (st == 1 || st == 2) ? ChargingState::Charging
+                          : (st == 3)            ? ChargingState::Full
+                          : (st == 0)            ? ChargingState::Discharging
+                                                 : ChargingState::Idle;
             return true;
         }
     }
     if (BYTE f = h.FeatureIndex(idx, 0x1000)) {  // BATTERY_STATUS: GetBatteryLevelStatus (fn 0)
         if (h.Call(idx, f, 0, {}, p) && p.size() >= 3) {
             int st = p[2];
-            s.charging = st >= 1 && st <= 4;
+            s.charging = (st == 1 || st == 2 || st == 4);
+            s.chargeState = (st == 1 || st == 2 || st == 4) ? ChargingState::Charging
+                          : (st == 3)                       ? ChargingState::Full
+                          : (st == 0)                       ? ChargingState::Discharging
+                                                            : ChargingState::Idle;
             s.percent = p[0] <= 100 ? p[0] : -1;
             if (s.percent == 0 && st == 3) s.percent = 100;
             return true;
@@ -146,6 +154,7 @@ bool ReadBattery20(Hidpp& h, BYTE idx, USHORT pid, DeviceStatus& s) {
         if (h.Call(idx, f, 0, {}, p) && p.size() >= 3) {
             s.millivolts = (p[0] << 8) | p[1];
             s.charging = (p[2] & 0x80) != 0;
+            s.chargeState = s.charging ? ChargingState::Charging : ChargingState::Discharging;
             if (s.millivolts) s.percent = LiIonPercent(s.millivolts);
             return true;
         }
@@ -154,6 +163,7 @@ bool ReadBattery20(Hidpp& h, BYTE idx, USHORT pid, DeviceStatus& s) {
         if (h.Call(idx, f, 0, {}, p) && p.size() >= 3) {
             s.millivolts = (p[0] << 8) | p[1];
             s.charging = p[2] == 0x03;
+            s.chargeState = s.charging ? ChargingState::Charging : ChargingState::Discharging;
             if (s.millivolts) s.percent = HeadsetPercent(pid, s.millivolts);
             return true;
         }

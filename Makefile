@@ -41,5 +41,7 @@ test:
 	./build/galaxy_buds_protocol_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/logitech_g435_0adf_test.cpp -o build/logitech_g435_0adf_test.exe
 	./build/logitech_g435_0adf_test.exe
+	$(CXX) $(CXXFLAGS) -municode tests/battery_intelligence_test.cpp src/battery_intelligence.cpp -o build/battery_intelligence_test.exe -lsetupapi -ladvapi32 -lole32
+	./build/battery_intelligence_test.exe
 
 .PHONY: clean test

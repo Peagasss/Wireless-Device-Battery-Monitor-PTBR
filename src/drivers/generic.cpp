@@ -19,6 +19,74 @@ bool IsBatteryUsage(USHORT page, USAGE usage) {
     return (page == 0x06 && usage == 0x20) || (page == 0x85 && usage == 0x65);
 }
 
+// Reads standard USB HID Battery System (UsagePage 0x85) charging state usages from a report:
+//   0x44 = Charging, 0x45 = Discharging, 0x46 = Fully Charged, 0xD0 = AC Present.
+ChargingState ReadHidBatteryChargingState(HIDP_REPORT_TYPE type, PHIDP_PREPARSED_DATA pp,
+                                          PCHAR reportBuf, ULONG reportLen) {
+    bool hasChargeDesc = false;
+    bool isCharging = false, isDischarging = false, isFull = false, acPresent = false;
+
+    // 1. Check boolean button usages on UsagePage 0x85.
+    USHORT numBtns = 0;
+    if (HidP_GetButtonCaps(type, nullptr, &numBtns, pp) == HIDP_STATUS_SUCCESS && numBtns > 0) {
+        std::vector<HIDP_BUTTON_CAPS> bc(numBtns);
+        if (HidP_GetButtonCaps(type, bc.data(), &numBtns, pp) == HIDP_STATUS_SUCCESS) {
+            for (USHORT i = 0; i < numBtns; i++) {
+                if (bc[i].UsagePage != 0x85) continue;
+                USAGE uMin = bc[i].IsRange ? bc[i].Range.UsageMin : bc[i].NotRange.Usage;
+                USAGE uMax = bc[i].IsRange ? bc[i].Range.UsageMax : bc[i].NotRange.Usage;
+                if ((uMin <= 0x44 && 0x44 <= uMax) || (uMin <= 0x45 && 0x45 <= uMax) ||
+                    (uMin <= 0x46 && 0x46 <= uMax) || (uMin <= 0xD0 && 0xD0 <= uMax)) {
+                    hasChargeDesc = true;
+                }
+            }
+            if (hasChargeDesc) {
+                ULONG maxUsages = HidP_MaxUsageListLength(type, 0x85, pp);
+                if (maxUsages > 0) {
+                    std::vector<USAGE> activeUsages(maxUsages);
+                    ULONG count = maxUsages;
+                    if (HidP_GetUsages(type, 0x85, 0, activeUsages.data(), &count, pp, reportBuf, reportLen) == HIDP_STATUS_SUCCESS) {
+                        for (ULONG idx = 0; idx < count; idx++) {
+                            if (activeUsages[idx] == 0x44) isCharging = true;
+                            if (activeUsages[idx] == 0x45) isDischarging = true;
+                            if (activeUsages[idx] == 0x46) isFull = true;
+                            if (activeUsages[idx] == 0xD0) acPresent = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Check value usages on UsagePage 0x85 (some devices declare 0x44/0x45/0x46/0xD0 as 1-bit or 8-bit values).
+    USHORT numVals = 0;
+    if (HidP_GetValueCaps(type, nullptr, &numVals, pp) == HIDP_STATUS_SUCCESS && numVals > 0) {
+        std::vector<HIDP_VALUE_CAPS> vc(numVals);
+        if (HidP_GetValueCaps(type, vc.data(), &numVals, pp) == HIDP_STATUS_SUCCESS) {
+            for (USHORT i = 0; i < numVals; i++) {
+                if (vc[i].UsagePage != 0x85) continue;
+                USAGE u = vc[i].IsRange ? vc[i].Range.UsageMin : vc[i].NotRange.Usage;
+                if (u != 0x44 && u != 0x45 && u != 0x46 && u != 0xD0) continue;
+                ULONG val = 0;
+                if (HidP_GetUsageValue(type, 0x85, vc[i].LinkCollection, u, &val, pp, reportBuf, reportLen) == HIDP_STATUS_SUCCESS) {
+                    hasChargeDesc = true;
+                    if (u == 0x44 && val != 0) isCharging = true;
+                    if (u == 0x45 && val != 0) isDischarging = true;
+                    if (u == 0x46 && val != 0) isFull = true;
+                    if (u == 0xD0 && val != 0) acPresent = true;
+                }
+            }
+        }
+    }
+
+    if (!hasChargeDesc) return ChargingState::Unknown;
+    if (isCharging) return ChargingState::Charging;
+    if (isFull) return ChargingState::Full;
+    if (acPresent && !isDischarging) return ChargingState::Idle;
+    if (isDischarging || hasChargeDesc) return ChargingState::Discharging;
+    return ChargingState::Unknown;
+}
+
 const DEVPROPKEY kBtBattery = { { 0x104EA319, 0x6EE2, 0x4701, { 0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5 } }, 2 };
 const DEVPROPKEY kIsConnected = { { 0x83DA6326, 0x97A6, 0x4088, { 0x94, 0x53, 0xA1, 0x92, 0x3F, 0x57, 0x3B, 0x29 } }, 15 };
 const DEVPROPKEY kClassOfDevice = { { 0x2BD67D8B, 0x8BEB, 0x48D5, { 0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A } }, 10 };
@@ -119,6 +187,7 @@ void PollGenericHid(PollContext& ctx) {
         if (!HidD_GetPreparsedData(h, &pp)) { CloseHandle(h); continue; }
 
         int pct = -1;
+        ChargingState chargeState = ChargingState::Unknown;
         for (HIDP_REPORT_TYPE type : { HidP_Feature, HidP_Input }) {
             USHORT n = type == HidP_Feature ? c.caps.NumberFeatureValueCaps : c.caps.NumberInputValueCaps;
             USHORT len = type == HidP_Feature ? c.featLen() : c.inLen();
@@ -142,6 +211,9 @@ void PollGenericHid(PollContext& ctx) {
                 if (percentQuirk) pct = (int)val;
                 else if (v.LogicalMax > v.LogicalMin) pct = Clamp100((int)(((LONG)val - v.LogicalMin) * 100 / (v.LogicalMax - v.LogicalMin)));
                 else if (val <= 100) pct = (int)val;
+                if (pct >= 0) {
+                    chargeState = ReadHidBatteryChargingState(type, pp, (PCHAR)buf.data(), len);
+                }
             }
             if (pct >= 0) break;
         }
@@ -156,6 +228,8 @@ void PollGenericHid(PollContext& ctx) {
         s.kind = KindFromCollections(ctx.colls, c.vid, c.pid);
         if (s.kind == DeviceKind::Other) s.kind = GuessKind(s.name);
         s.percent = pct;
+        s.chargeState = chargeState;
+        s.charging = (chargeState == ChargingState::Charging);
         ctx.Add(s, c.vid, c.pid);
     }
 }

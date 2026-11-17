@@ -34,11 +34,23 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
-      - name: Build installer and portable zip
+      - name: Build installer and portable zip (with optional Authenticode signing)
         shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+          SIGN_TIMESTAMP_URL: ${{ secrets.SIGN_TIMESTAMP_URL }}
+          AZURE_TRUSTED_SIGNING_DLIB: ${{ secrets.AZURE_TRUSTED_SIGNING_DLIB }}
+          AZURE_TRUSTED_SIGNING_METADATA: ${{ secrets.AZURE_TRUSTED_SIGNING_METADATA }}
         run: |
           $version = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { '0.0.0' }
           ./installer/build-installer.ps1 -Version $version
+
+      - name: Verify artifact signatures and SHA-256 integrity
+        shell: pwsh
+        run: |
+          ./scripts/verify-signatures.ps1
+          Get-Content dist/SHA256SUMS.txt
 
       - name: Fetch HeadsetControl source (GPL corresponding source for the bundled binary)
         shell: pwsh

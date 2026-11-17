@@ -107,7 +107,19 @@ int PollWgi(PollContext& ctx, int& thirdParty) {
                 s.kind = DeviceKind::Gamepad;
                 s.via = L"Xbox Wireless / Bluetooth";
                 s.percent = Clamp100(r * 100 / f);
-                s.charging = st == ABI::Windows::System::Power::BatteryStatus_Charging;
+                if (st == ABI::Windows::System::Power::BatteryStatus_Charging) {
+                    s.chargeState = ChargingState::Charging;
+                    s.charging = true;
+                } else if (st == ABI::Windows::System::Power::BatteryStatus_Discharging) {
+                    s.chargeState = ChargingState::Discharging;
+                    s.charging = false;
+                } else if (st == ABI::Windows::System::Power::BatteryStatus_Idle) {
+                    s.chargeState = (r >= f && f > 0) ? ChargingState::Full : ChargingState::Idle;
+                    s.charging = false;
+                } else {
+                    s.chargeState = ChargingState::Unknown;
+                    s.charging = false;
+                }
                 ctx.Add(s, vid, pid);
                 added++;
                 if (vid != 0x045E) thirdParty++;

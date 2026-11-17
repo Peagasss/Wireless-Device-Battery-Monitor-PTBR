@@ -31,6 +31,10 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
+#ifdef EnableCodeSigning
+SignTool=byscript
+SignedUninstaller=yes
+#endif
 
 [Tasks]
 Name: "autostart"; Description: "Start Wireless Battery when I sign in to Windows"

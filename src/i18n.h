@@ -38,6 +38,10 @@ enum class StrId {
     G435BatteryRealBt,
     G435BatteryReferenceBt,
     G435BatteryEstimated,
+    RuntimeUnavailable,
+    ConfidenceLow,
+    ConfidenceMedium,
+    ConfidenceHigh,
 };
 
 inline Lang g_lang = Lang::Auto;
@@ -144,9 +148,35 @@ inline const wchar_t* Tr(StrId id) {
         case StrId::G435BatteryEstimated:
             return pt ? L"bateria estimada"
                       : L"estimated battery";
+        case StrId::RuntimeUnavailable:
+            return pt ? L"autonomia indisponível"
+                      : L"runtime unavailable";
+        case StrId::ConfidenceLow:
+            return pt ? L"confiança baixa"
+                      : L"low confidence";
+        case StrId::ConfidenceMedium:
+            return pt ? L"confiança média"
+                      : L"medium confidence";
+        case StrId::ConfidenceHigh:
+            return pt ? L"confiança alta"
+                      : L"high confidence";
         default:
             return L"";
     }
+}
+
+inline std::wstring FormatRemainingRuntime(int minutes) {
+    if (minutes <= 0) return L"";
+    bool pt = IsPortuguese();
+    int hrs = minutes / 60;
+    int mins = minutes % 60;
+    if (hrs > 0 && mins == 0) {
+        return L"~" + std::to_wstring(hrs) + (pt ? L"h restantes" : L"h remaining");
+    }
+    if (hrs > 0) {
+        return L"~" + std::to_wstring(hrs) + L"h " + std::to_wstring(mins) + (pt ? L"min restantes" : L"m remaining");
+    }
+    return L"~" + std::to_wstring(mins) + (pt ? L"min restantes" : L"m remaining");
 }
 
 inline std::wstring FormatLowBattery(const std::wstring& name, int pct) {

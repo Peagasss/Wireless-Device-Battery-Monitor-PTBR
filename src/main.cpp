@@ -315,10 +315,21 @@ std::wstring StatusText(const TrayEntry& e) {
     if (!s.connected) return Tr(StrId::OffNotConnected);
     std::wstring t;
     if (!s.levelText.empty() && s.percent >= 0) t = s.levelText;
-    else if (s.percent >= 0) t = std::to_wstring(s.percent) + L"%";
+    else if (s.percent >= 0) t = (s.estimated ? L"~" : L"") + std::to_wstring(s.percent) + L"%";
     else if (e.lastPct >= 0) t = std::to_wstring(e.lastPct) + L"% " + Tr(StrId::LastKnown);
     else if (!s.detail.empty()) return s.detail;
     else t = Tr(StrId::Unknown);
+
+    if (s.charging) {
+        t += L" \x26A1";  // ⚡ lightning bolt when Charging is confirmed
+    } else if (!s.asleep && (s.percent >= 0 || e.lastPct >= 0)) {
+        if (s.runtimeMinutes > 0) {
+            t += L" \x00B7 " + FormatRemainingRuntime(s.runtimeMinutes);
+        } else if (s.chargeState != ChargingState::Full) {
+            t += L" \x00B7 " + std::wstring(Tr(StrId::RuntimeUnavailable));
+        }
+    }
+
     if (!s.detail.empty()) t += L" (" + s.detail + L")";
     if (s.charging) t += L", " + std::wstring(Tr(StrId::Charging));
     if (s.asleep) t += L", " + std::wstring(Tr(StrId::Asleep));
@@ -735,8 +746,13 @@ int ListToConsole(bool dump) {
         if (!s.connected) line += L"off / not connected";
         else if (s.asleep) line += L"asleep";
         else if (!s.levelText.empty()) line += s.levelText;
-        else if (s.percent >= 0) line += std::to_wstring(s.percent) + L"%";
+        else if (s.percent >= 0) line += (s.estimated ? L"~" : L"") + std::to_wstring(s.percent) + L"%";
         else line += L"unknown";
+        if (s.charging) line += L" \x26A1";
+        else if (s.connected && !s.asleep && s.percent >= 0) {
+            if (s.runtimeMinutes > 0) line += L" \x00B7 " + FormatRemainingRuntime(s.runtimeMinutes);
+            else if (s.chargeState != ChargingState::Full) line += L" \x00B7 " + std::wstring(Tr(StrId::RuntimeUnavailable));
+        }
         if (!s.detail.empty()) line += L" (" + s.detail + L")";
         if (s.charging) line += L", charging";
         if (s.millivolts) line += L", " + std::to_wstring(s.millivolts) + L" mV";

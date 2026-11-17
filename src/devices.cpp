@@ -60,6 +60,7 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollBluetooth(ctx);   // before the generic HID check: Windows' own level wins for the same device
     PollGenericHid(ctx);
     PollXInput(ctx);
+    ApplyBatteryIntelligence(ctx.out);
     return ctx.out;
 }
 

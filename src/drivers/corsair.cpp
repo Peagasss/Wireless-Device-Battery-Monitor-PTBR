@@ -38,6 +38,7 @@ bool PollVoid(const HidColl& c, DeviceStatus& s) {
     s.via = L"2.4 GHz receiver";
     s.connected = st != 0;
     s.charging = st == 4 || st == 5;
+    s.chargeState = s.charging ? ChargingState::Charging : (s.connected ? ChargingState::Discharging : ChargingState::Unknown);
     if (st == 1 || st == 2 || s.charging) s.percent = Clamp100(r[2] & 0x7F);
     return true;
 }
@@ -151,7 +152,12 @@ void PollCorsair(PollContext& ctx) {
                 s.via = target == 0x08 ? L"USB / Bluetooth" : L"Corsair receiver";
                 s.percent = Clamp100((int)(level + 5) / 10);
                 unsigned charge = 0;
-                if (b.Get(target, 0x10, charge)) s.charging = charge == 1 || charge == 3;
+                if (b.Get(target, 0x10, charge)) {
+                    s.charging = (charge == 1);
+                    s.chargeState = (charge == 1) ? ChargingState::Charging
+                                  : (charge == 3) ? ChargingState::Full
+                                                  : ChargingState::Discharging;
+                }
                 ctx.out.push_back(s);
                 any = true;
             }

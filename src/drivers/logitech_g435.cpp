@@ -139,65 +139,12 @@ bool IsG435BluetoothName(const std::wstring& name) {
 
 // ---- Registry Persistence for G435Estimator::State --------------------------------------------
 
-DWORD ReadRegDword(HKEY key, const wchar_t* name, DWORD defVal) {
-    DWORD v = defVal, sz = sizeof(v);
-    if (RegGetValueW(key, nullptr, name, RRF_RT_REG_DWORD, nullptr, &v, &sz) == ERROR_SUCCESS)
-        return v;
-    return defVal;
-}
-
-std::uint64_t ReadRegQword(HKEY key, const wchar_t* name, std::uint64_t defVal) {
-    std::uint64_t v = defVal;
-    DWORD sz = sizeof(v);
-    if (RegGetValueW(key, nullptr, name, RRF_RT_REG_QWORD, nullptr, &v, &sz) == ERROR_SUCCESS)
-        return v;
-    return defVal;
-}
-
 G435Estimator::State LoadEstimatorState() {
-    G435Estimator::State st;
-    HKEY k = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kG435RegKey, 0, KEY_READ, &k) != ERROR_SUCCESS)
-        return st;
-
-    st.calibrated               = ReadRegDword(k, L"Calibrated", 0) != 0;
-    st.promptShown              = ReadRegDword(k, L"PromptShown", 0) != 0;
-    DWORD pct                   = ReadRegDword(k, L"LastRealPercent", 0xFFFFFFFFu);
-    st.lastRealPercent          = (pct <= 100) ? static_cast<int>(pct) : -1;
-    st.lastRealTimestampSec     = ReadRegQword(k, L"LastRealTimestampSec", 0);
-    st.activeUsageSec           = ReadRegQword(k, L"ActiveUsageSec", 0);
-    st.learnedRateMilliPctPerHr = ReadRegDword(k, L"LearnedRateMilliPctPerHr", 0);
-    st.sampleCount              = ReadRegDword(k, L"SampleCount", 0);
-    st.lastPollTimestampSec     = ReadRegQword(k, L"LastPollTimestampSec", 0);
-    if (!st.calibrated || st.lastRealPercent < 0) {
-        st.calibrated = false;
-        st.lastRealPercent = -1;
-    }
-    RegCloseKey(k);
-    return st;
+    return LoadDeviceBatteryHistory(L"g435");
 }
 
 void SaveEstimatorState(const G435Estimator::State& st) {
-    HKEY k = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, kG435RegKey, 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS)
-        return;
-
-    auto setDw = [&](const wchar_t* name, DWORD v) {
-        RegSetValueExW(k, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
-    };
-    auto setQw = [&](const wchar_t* name, std::uint64_t v) {
-        RegSetValueExW(k, name, 0, REG_QWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
-    };
-
-    setDw(L"Calibrated", st.calibrated ? 1u : 0u);
-    setDw(L"PromptShown", st.promptShown ? 1u : 0u);
-    setDw(L"LastRealPercent", st.lastRealPercent >= 0 ? static_cast<DWORD>(st.lastRealPercent) : 0xFFFFFFFFu);
-    setQw(L"LastRealTimestampSec", st.lastRealTimestampSec);
-    setQw(L"ActiveUsageSec", st.activeUsageSec);
-    setDw(L"LearnedRateMilliPctPerHr", st.learnedRateMilliPctPerHr);
-    setDw(L"SampleCount", st.sampleCount);
-    setQw(L"LastPollTimestampSec", st.lastPollTimestampSec);
-    RegCloseKey(k);
+    SaveDeviceBatteryHistory(L"g435", st);
 }
 
 // ---- Passive HID Interrupt IN Monitor & WASAPI Audio Activity for Jieli 4C4A:4155 -------------
@@ -527,6 +474,8 @@ void PollLogitechG435(PollContext& ctx) {
         s.via = L"Bluetooth";
         s.connected = true;
         s.estimated = false;
+        s.chargeState = ChargingState::Unknown;
+        s.activityState = ActivityState::Active;
         s.percent = bt.percent;  // real 0..100% from DEVPKEY_Device_BatteryLevel
         if (bt.percent >= 0) {
             s.detail = Tr(StrId::G435BatteryRealBt);
@@ -605,6 +554,10 @@ void PollLogitechG435(PollContext& ctx) {
         s.connected = true;
         s.percent = ev.percent;
         s.estimated = ev.estimated;
+        s.chargeState = ChargingState::Unknown;
+        s.activityState = activelyInUse ? ActivityState::Active : ActivityState::Idle;
+        s.confidence = ev.confidence;
+        s.runtimeMinutes = ev.runtimeMinutes;
         if (ev.showCalibrationPrompt) {
             s.calibrateMsg = Tr(StrId::G435CalibratePrompt);
         }
